@@ -16,7 +16,7 @@ import {
   getCoursesList,
   findCourseByQuery
 } from '../google/classroom.js';
-import { askGemini, clearChatHistory } from '../ai/gemini.js';
+import { askGemini, clearChatHistory, getModelsListText, setPreferredModel, getPreferredModel } from '../ai/gemini.js';
 
 let sock = null;
 let botJid = null;
@@ -148,7 +148,7 @@ export async function initWhatsAppBot() {
       const isGroup = remoteJid.endsWith('@g.us');
 
       // Check if command starts with a supported prefix
-      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync)/i.test(text);
+      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|model|models)/i.test(text);
 
       // In groups, check if bot is mentioned
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -240,7 +240,10 @@ Download and send the actual PDF/document directly into this WhatsApp chat!
 (Owner only) Automatically upload any new posts, announcements, and files from a classroom to this group!
 
 🤖 *!ai <question>* or tag *@bot <question>*
-Ask Gemini AI with conversational memory.
+Ask AI with conversational memory.
+
+⚙️ *!models* or *!model <name>*
+View & switch free AI models (auto, lite, flash, preview, r1, llama3).
 
 🧹 *!clear* or *!reset*
 Clear AI conversation memory to start a fresh topic.
@@ -698,9 +701,36 @@ Check bot connection and auto-sync status.`;
           return;
         }
 
-        await sendMessage(remoteJid, '🤖 *Gemini is thinking...*', originalMsg);
+        await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
         const reply = await askGemini(question, remoteJid);
         await sendMessage(remoteJid, reply, originalMsg);
+        break;
+      }
+
+      case 'model':
+      case 'models': {
+        const arg = cleanText.replace(/^[!/.#]?(model|models)\s*/i, '').trim();
+
+        if (!arg) {
+          const listText = getModelsListText(remoteJid);
+          await sendMessage(remoteJid, listText, originalMsg);
+          return;
+        }
+
+        const switched = setPreferredModel(remoteJid, arg);
+        if (switched) {
+          await sendMessage(
+            remoteJid,
+            `✅ *AI model set to ${switched.name}!* 🎯\n_${switched.description}_`,
+            originalMsg
+          );
+        } else {
+          await sendMessage(
+            remoteJid,
+            `❌ *Unrecognized model "${arg}".*\n👉 Type *!models* to see all available model names (e.g. *!model lite*, *!model flash*, *!model auto*).`,
+            originalMsg
+          );
+        }
         break;
       }
 
