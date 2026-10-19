@@ -92,11 +92,48 @@ export function extractMaterials(materials = []) {
 }
 
 /**
- * Get all upcoming assignments sorted by nearest due date
+ * Fetch formatted course list with index numbers
  */
-export async function getUpcomingAssignments() {
-  const classroom = getClassroomClient();
+export async function getCoursesList() {
   const courses = await getCourses();
+  return courses.map((c, i) => ({
+    index: i + 1,
+    id: c.id,
+    name: c.name,
+    section: c.section || '',
+    alternateLink: c.alternateLink
+  }));
+}
+
+/**
+ * Resolve user query (number "1", "cls 1", or partial course name) to a course
+ */
+export async function findCourseByQuery(query) {
+  if (!query) return null;
+  const clean = query.trim().toLowerCase().replace(/^cls\s*/i, '').replace(/^[#]/, '');
+  const courses = await getCoursesList();
+
+  // 1. Try matching numeric index (e.g., 1, 2, 3...)
+  const num = parseInt(clean, 10);
+  if (!isNaN(num) && num >= 1 && num <= courses.length) {
+    return courses[num - 1];
+  }
+
+  // 2. Try partial course name match
+  const found = courses.find(c => c.name.toLowerCase().includes(clean));
+  return found || null;
+}
+
+/**
+ * Get all upcoming assignments sorted by nearest due date
+ * Optionally filtered by targetCourseId
+ */
+export async function getUpcomingAssignments(targetCourseId = null) {
+  const classroom = getClassroomClient();
+  let courses = await getCourses();
+  if (targetCourseId) {
+    courses = courses.filter(c => c.id === targetCourseId);
+  }
   const allAssignments = [];
 
   for (const course of courses) {
@@ -145,10 +182,14 @@ export async function getUpcomingAssignments() {
 
 /**
  * Get recently uploaded materials and announcements across all courses
+ * Optionally filtered by targetCourseId
  */
-export async function getRecentCourseMaterials(hoursBack = 720) {
+export async function getRecentCourseMaterials(hoursBack = 720, targetCourseId = null) {
   const classroom = getClassroomClient();
-  const courses = await getCourses();
+  let courses = await getCourses();
+  if (targetCourseId) {
+    courses = courses.filter(c => c.id === targetCourseId);
+  }
   const cutoff = new Date(Date.now() - hoursBack * 60 * 60 * 1000);
   const recentItems = [];
 
@@ -165,7 +206,9 @@ export async function getRecentCourseMaterials(hoursBack = 720) {
         const updateTime = new Date(m.creationTime || m.updateTime);
         if (updateTime >= cutoff) {
           recentItems.push({
+            id: m.id,
             type: 'material',
+            courseId: course.id,
             courseName: course.name,
             title: m.title,
             description: m.description,
@@ -187,7 +230,9 @@ export async function getRecentCourseMaterials(hoursBack = 720) {
         const updateTime = new Date(a.creationTime || a.updateTime);
         if (updateTime >= cutoff) {
           recentItems.push({
+            id: a.id,
             type: 'announcement',
+            courseId: course.id,
             courseName: course.name,
             title: '📢 Announcement',
             description: a.text,
@@ -209,7 +254,9 @@ export async function getRecentCourseMaterials(hoursBack = 720) {
         const postTime = new Date(w.creationTime || w.updateTime);
         if (postTime >= cutoff) {
           recentItems.push({
+            id: w.id,
             type: 'assignment',
+            courseId: course.id,
             courseName: course.name,
             title: `📝 ${w.title}`,
             description: w.description || '',

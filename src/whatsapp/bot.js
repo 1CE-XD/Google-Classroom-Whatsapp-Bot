@@ -8,7 +8,14 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import path from 'path';
 import { db } from '../storage/db.js';
-import { getUpcomingAssignments, getRecentCourseMaterials, downloadDriveFile, formatDateTime } from '../google/classroom.js';
+import {
+  getUpcomingAssignments,
+  getRecentCourseMaterials,
+  downloadDriveFile,
+  formatDateTime,
+  getCoursesList,
+  findCourseByQuery
+} from '../google/classroom.js';
 import { askGemini, clearChatHistory } from '../ai/gemini.js';
 
 let sock = null;
@@ -141,7 +148,7 @@ export async function initWhatsAppBot() {
       const isGroup = remoteJid.endsWith('@g.us');
 
       // Check if command starts with a supported prefix
-      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status)/i.test(text);
+      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync)/i.test(text);
 
       // In groups, check if bot is mentioned
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -217,45 +224,105 @@ async function handleCommand(remoteJid, rawText, isGroup, originalMsg) {
 
 Here are the available commands:
 
-📌 *!due* or *!assignments*
-View upcoming assignments, deadlines, and direct submission links.
+📚 *!courses* or *!cls*
+List all enrolled Google Classrooms with numbers ([1], [2], etc.).
 
-📁 *!recent* or *!files*
-View recently uploaded materials, lecture files, and announcements.
+📌 *!due* or *!due <number>*
+View upcoming assignments and deadlines (optionally filtered by classroom number).
+
+📁 *!recent* or *!recent <number>*
+View recently posted materials, files, and announcements (optionally filtered by classroom).
 
 📥 *!get <number>* or *!download <number>*
 Download and send the actual PDF/document directly into this WhatsApp chat!
 
+🔄 *!autosync <number>* or *!autosync all*
+(Owner only) Automatically upload any new posts, announcements, and files from a classroom to this group!
+
 🤖 *!ai <question>* or tag *@bot <question>*
-Ask Gemini AI with conversational memory (it remembers previous context!).
+Ask Gemini AI with conversational memory.
 
 🧹 *!clear* or *!reset*
 Clear AI conversation memory to start a fresh topic.
 
-🔔 *!subscribe*
-Enable deadline reminders in this group (alerted only at 24h & 2h before due time).
-
-🔕 *!unsubscribe*
-Disable deadline reminders in this group.
+🔔 *!subscribe* / 🔕 *!unsubscribe*
+(Owner only) Enable or disable bot notifications in this group.
 
 ℹ️ *!status*
-Check bot connection status.`;
+Check bot connection and auto-sync status.`;
 
         await sendMessage(remoteJid, helpMessage, originalMsg);
         break;
       }
 
-      case 'due':
-      case 'assignments': {
-        await sendMessage(remoteJid, '⏳ Fetching upcoming assignments from Google Classroom...', originalMsg);
-        const assignments = await getUpcomingAssignments();
+      case 'courses':
+      case 'classes':
+      case 'cls': {
+        await sendMessage(remoteJid, '⏳ Fetching enrolled Google Classrooms...', originalMsg);
+        const courses = await getCoursesList();
 
-        if (assignments.length === 0) {
-          await sendMessage(remoteJid, '🎉 *No upcoming assignments found!* Everything is clear.', originalMsg);
+        if (courses.length === 0) {
+          await sendMessage(remoteJid, '📂 No active Google Classrooms found for your account.', originalMsg);
           return;
         }
 
-        let reply = `📝 *Upcoming Assignments (${assignments.length})*:\n\n`;
+        let reply = `📚 *Enrolled Google Classrooms (${courses.length})*:\n\n`;
+        courses.forEach((c) => {
+          reply += `*[${c.index}] ${c.name}*\n`;
+          if (c.section) reply += `   _Section: ${c.section}_\n`;
+        });
+
+        reply += `\n💡 *Classroom-specific commands:*\n` +
+          `👉 *!recent 1* — View recent files & uploads for course 1\n` +
+          `👉 *!due 1* — View upcoming assignments for course 1\n` +
+          `👉 *!autosync 1* — Auto-upload new files & posts from course 1 to this group\n` +
+          `👉 *!autosync all* — Auto-upload from ALL classrooms to this group`;
+
+        await sendMessage(remoteJid, reply.trim(), originalMsg);
+        break;
+      }
+
+      case 'due':
+      case 'assignments': {
+        const query = cleanText.replace(/^[!/.#]?(due|assignments)\s*/i, '').trim();
+        let targetCourse = null;
+
+        if (query) {
+          targetCourse = await findCourseByQuery(query);
+          if (!targetCourse) {
+            await sendMessage(
+              remoteJid,
+              `❌ *Classroom not found for "${query}".*\n👉 Type *!courses* to see all enrolled classrooms and their numbers.`,
+              originalMsg
+            );
+            return;
+          }
+        }
+
+        await sendMessage(
+          remoteJid,
+          targetCourse
+            ? `⏳ Fetching upcoming assignments for *${targetCourse.name}*...`
+            : '⏳ Fetching upcoming assignments from Google Classroom...',
+          originalMsg
+        );
+
+        const assignments = await getUpcomingAssignments(targetCourse?.id || null);
+
+        if (assignments.length === 0) {
+          await sendMessage(
+            remoteJid,
+            targetCourse
+              ? `🎉 *No upcoming assignments for "${targetCourse.name}"!*`
+              : '🎉 *No upcoming assignments found!* Everything is clear.',
+            originalMsg
+          );
+          return;
+        }
+
+        let reply = targetCourse
+          ? `📝 *Upcoming Assignments for ${targetCourse.name} (${assignments.length})*:\n\n`
+          : `📝 *Upcoming Assignments (${assignments.length})*:\n\n`;
         const now = new Date();
 
         assignments.slice(0, 8).forEach((a, index) => {
@@ -290,6 +357,10 @@ Check bot connection status.`;
           reply += `\n`;
         });
 
+        if (!targetCourse) {
+          reply += `💡 *Tip:* Type *!due 1* or *!due <name>* to filter by a specific classroom!`;
+        }
+
         await sendMessage(remoteJid, reply.trim(), originalMsg);
         break;
       }
@@ -297,11 +368,39 @@ Check bot connection status.`;
       case 'recent':
       case 'files':
       case 'materials': {
-        await sendMessage(remoteJid, '⏳ Checking uploads from the past 1 month in Classroom...', originalMsg);
-        const recentItems = await getRecentCourseMaterials(720); // Last 30 days (1 month)
+        const query = cleanText.replace(/^[!/.#]?(recent|files|materials)\s*/i, '').trim();
+        let targetCourse = null;
+
+        if (query) {
+          targetCourse = await findCourseByQuery(query);
+          if (!targetCourse) {
+            await sendMessage(
+              remoteJid,
+              `❌ *Classroom not found for "${query}".*\n👉 Type *!courses* to see all enrolled classrooms and their numbers.`,
+              originalMsg
+            );
+            return;
+          }
+        }
+
+        await sendMessage(
+          remoteJid,
+          targetCourse
+            ? `⏳ Checking uploads for *${targetCourse.name}* (past month)...`
+            : '⏳ Checking uploads from the past 1 month in Classroom...',
+          originalMsg
+        );
+
+        const recentItems = await getRecentCourseMaterials(720, targetCourse?.id || null);
 
         if (recentItems.length === 0) {
-          await sendMessage(remoteJid, '📂 No files or announcements found from the past month.', originalMsg);
+          await sendMessage(
+            remoteJid,
+            targetCourse
+              ? `📂 No recent uploads found for *${targetCourse.name}*.`
+              : '📂 No files or announcements found from the past month.',
+            originalMsg
+          );
           return;
         }
 
@@ -325,9 +424,14 @@ Check bot connection status.`;
           }
         });
 
-        let reply = `📂 *Classroom Uploads & Materials (Past 1 Month)*:\n\n`;
+        let reply = targetCourse
+          ? `📂 *Uploads for [${targetCourse.index}] ${targetCourse.name}*:\n\n`
+          : `📂 *Classroom Uploads & Materials (Past 1 Month)*:\n\n`;
+
         recentItems.slice(0, 10).forEach((item) => {
-          reply += `📖 *Course:* ${item.courseName}\n`;
+          if (!targetCourse) {
+            reply += `📖 *Course:* ${item.courseName}\n`;
+          }
           reply += `📌 *${item.title}*\n`;
           if (item.time) {
             reply += `📅 *Posted:* ${formatDateTime(item.time)}\n`;
@@ -357,10 +461,101 @@ Check bot connection status.`;
 
         if (cachedFiles.length > 0) {
           reply += `💡 *To receive any file directly here in WhatsApp:*\n` +
-            `👉 Type *!get 1* or *!get 2* (using the [number] above)!`;
+            `👉 Type *!get 1* or *!get 2* (using the [number] above)!\n\n`;
+        }
+
+        if (!targetCourse) {
+          reply += `💡 *Tip:* Type *!recent 1* or *!recent <name>* to filter by a specific classroom!`;
         }
 
         await sendMessage(remoteJid, reply.trim(), originalMsg);
+        break;
+      }
+
+      case 'autosync':
+      case 'sync': {
+        if (!isGroup) {
+          await sendMessage(remoteJid, 'ℹ️ The *!autosync* command is intended for WhatsApp groups.', originalMsg);
+          return;
+        }
+
+        if (!isOwner(originalMsg)) {
+          await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can configure auto-sync for groups.', originalMsg);
+          return;
+        }
+
+        const arg = cleanText.replace(/^[!/.#]?(autosync|sync)\s*/i, '').trim();
+
+        // 1. If no argument provided, display current status
+        if (!arg) {
+          const currentConfig = db.getGroupAutoSync(remoteJid);
+          let statusMsg = `🔄 *Classroom Live Auto-Sync Status*\n\n`;
+          if (currentConfig && currentConfig.enabled) {
+            statusMsg += `• Status: 🟢 *ACTIVE*\n` +
+              `• Target Classroom: *${currentConfig.courseName}*\n` +
+              `• Direct File Uploads: ${currentConfig.autoUploadFiles !== false ? '✅ Enabled' : '❌ Disabled'}\n\n` +
+              `💡 *To change:* Type *!autosync off* to disable, or *!autosync <number>* to change course.`;
+          } else {
+            statusMsg += `• Status: 🔴 *DISABLED*\n\n` +
+              `💡 *How to activate auto-sync for this group:*\n` +
+              `👉 *!autosync all* — Auto-upload updates & files from ALL classrooms\n` +
+              `👉 *!autosync 1* — Dedicate this group to classroom [1] (Type *!courses* to see numbers)\n` +
+              `👉 *!autosync off* — Turn off auto-sync in this group`;
+          }
+          await sendMessage(remoteJid, statusMsg, originalMsg);
+          return;
+        }
+
+        // 2. Turn off auto-sync
+        if (arg === 'off' || arg === 'disable' || arg === 'stop') {
+          db.removeGroupAutoSync(remoteJid);
+          await sendMessage(remoteJid, '🔕 *Live Auto-Sync disabled for this group.*', originalMsg);
+          return;
+        }
+
+        // 3. Sync all courses
+        if (arg === 'all' || arg === 'on' || arg === 'enable') {
+          db.addSubscriber(remoteJid);
+          db.setGroupAutoSync(remoteJid, {
+            enabled: true,
+            courseId: null,
+            courseName: 'All Classrooms',
+            autoUploadFiles: true
+          });
+          await sendMessage(
+            remoteJid,
+            '✅ *Auto-Sync Activated for ALL Google Classrooms!* 🚀\n\n' +
+            'Whenever teachers post new announcements, texts, assignments, or upload documents/PDFs in any course, the bot will automatically notify and upload the files directly into this WhatsApp group!',
+            originalMsg
+          );
+          return;
+        }
+
+        // 4. Sync specific course by number or name
+        const course = await findCourseByQuery(arg);
+        if (!course) {
+          await sendMessage(
+            remoteJid,
+            `❌ *Classroom not found for "${arg}".*\n👉 Type *!courses* to see all enrolled classrooms and their numbers, then run *!autosync <number>*.`,
+            originalMsg
+          );
+          return;
+        }
+
+        db.addSubscriber(remoteJid);
+        db.setGroupAutoSync(remoteJid, {
+          enabled: true,
+          courseId: course.id,
+          courseName: `[${course.index}] ${course.name}`,
+          autoUploadFiles: true
+        });
+
+        await sendMessage(
+          remoteJid,
+          `✅ *Auto-Sync Dedicated to [${course.index}] ${course.name}!* 🎯\n\n` +
+          `Whenever the teacher posts new announcements, homework, or uploads files in *${course.name}*, the bot will automatically post updates and upload the documents directly into this WhatsApp chat!`,
+          originalMsg
+        );
         break;
       }
 
@@ -472,12 +667,14 @@ Check bot connection status.`;
 
       case 'status': {
         const subscribed = isGroup ? db.isSubscribed(remoteJid) : null;
+        const autoSync = isGroup ? db.getGroupAutoSync(remoteJid) : null;
         let reply = `🤖 *Bot Status*\n` +
           `• Connection: ✅ Active & Ready\n`;
         if (isGroup) {
-          reply += `• Group Permissions: ${subscribed ? '🟢 Activated' : '🔴 Deactivated (owner must type !subscribe)'}`;
+          reply += `• Group Permissions: ${subscribed ? '🟢 Activated' : '🔴 Deactivated (owner must type !subscribe)'}\n`;
+          reply += `• Live Auto-Sync: ${autoSync && autoSync.enabled ? `🟢 Active (${autoSync.courseName})` : '🔴 Inactive (type !autosync)'}\n`;
         }
-        await sendMessage(remoteJid, reply, originalMsg);
+        await sendMessage(remoteJid, reply.trim(), originalMsg);
         break;
       }
 

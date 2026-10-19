@@ -1,16 +1,123 @@
 import cron from 'node-cron';
 import { db } from '../storage/db.js';
-import { getUpcomingAssignments, formatDateTime } from '../google/classroom.js';
+import { getUpcomingAssignments, getRecentCourseMaterials, downloadDriveFile, formatDateTime } from '../google/classroom.js';
 import { sendMessage, getSocket } from '../whatsapp/bot.js';
 
 export function startScheduler() {
-  console.log('⏰ Background assignment reminder scheduler started.');
-  console.log('👉 Silent hourly checks enabled. Only sends a message when an assignment deadline is near.\n');
+  console.log('⏰ Background assignment reminder and live auto-sync scheduler started.');
+  console.log('👉 Silent checks active: Deadlines checked every 30m, new classroom uploads checked every 10m.\n');
 
-  // Check silently every 30 minutes: "*/30 * * * *"
+  // Check assignment deadlines every 30 minutes
   cron.schedule('*/30 * * * *', async () => {
     await checkAssignmentReminders();
   });
+
+  // Check new classroom materials and announcements every 10 minutes
+  cron.schedule('*/10 * * * *', async () => {
+    await checkClassroomAutoSync();
+  });
+}
+
+/**
+ * Automatically detects and uploads new classroom posts, texts, and files to groups with auto-sync enabled
+ */
+export async function checkClassroomAutoSync() {
+  const sock = getSocket();
+  if (!sock) return;
+
+  const autoSyncGroups = db.getAllAutoSyncGroups();
+  const groupJids = Object.keys(autoSyncGroups);
+  if (groupJids.length === 0) return; // No groups configured for auto-sync
+
+  try {
+    // Fetch materials, announcements, and assignments from the past 48 hours
+    const recentItems = await getRecentCourseMaterials(48);
+
+    // If this is the initial run, index existing items to avoid spamming old history
+    if (!db.isClassroomSeeded()) {
+      for (const item of recentItems) {
+        if (item.id) db.markClassroomItemSeen(item.id);
+      }
+      db.setClassroomSeeded(true);
+      console.log(`📦 Classroom initial state indexed (${recentItems.length} items). Live auto-sync is listening.`);
+      return;
+    }
+
+    // Process items in chronological order (oldest to newest)
+    const reversed = [...recentItems].reverse();
+
+    for (const item of reversed) {
+      if (!item.id || db.hasSeenClassroomItem(item.id)) {
+        continue;
+      }
+
+      // Check which groups should receive this item
+      for (const jid of groupJids) {
+        const config = autoSyncGroups[jid];
+        if (!config || !config.enabled) continue;
+
+        // If configured for a specific classroom, check courseId match
+        if (config.courseId && config.courseId !== item.courseId) {
+          continue;
+        }
+
+        let typeEmoji = '📌';
+        let typeName = 'Classroom Update';
+        if (item.type === 'assignment') {
+          typeEmoji = '📝';
+          typeName = 'New Assignment';
+        } else if (item.type === 'announcement') {
+          typeEmoji = '📢';
+          typeName = 'New Announcement';
+        } else if (item.type === 'material') {
+          typeEmoji = '📂';
+          typeName = 'New Study Material';
+        }
+
+        let msg = `${typeEmoji} *${typeName.toUpperCase()}* ${typeEmoji}\n\n` +
+          `📖 *Course:* ${item.courseName}\n` +
+          `📌 *Title:* ${item.title.replace(/^[📝📢\s]+/, '')}\n` +
+          (item.time ? `📅 *Posted:* ${formatDateTime(item.time)}\n` : '') +
+          (item.deadline ? `⏰ *Due Date:* ${formatDateTime(item.deadline)}\n` : '');
+
+        if (item.description && item.description.trim()) {
+          msg += `\n💬 *Content:*\n${item.description.trim()}\n`;
+        }
+
+        if (item.alternateLink) {
+          msg += `\n🔗 *Classroom Link:* ${item.alternateLink}\n`;
+        }
+
+        // Send text announcement/update first
+        await sendMessage(jid, msg.trim());
+
+        // Auto-upload attached files if enabled
+        if (config.autoUploadFiles !== false && item.files && item.files.length > 0) {
+          for (const file of item.files) {
+            if (file.id && file.type === 'drive') {
+              try {
+                const fileData = await downloadDriveFile(file.id, file.title);
+                await sock.sendMessage(jid, {
+                  document: fileData.buffer,
+                  fileName: fileData.fileName,
+                  mimetype: fileData.mimeType,
+                  caption: `📄 *${fileData.fileName}*\n📖 Course: ${item.courseName}`
+                });
+                console.log(`📤 Auto-uploaded file "${fileData.fileName}" to group ${jid}`);
+              } catch (err) {
+                console.warn(`Could not auto-download file "${file.title}" for group ${jid}:`, err.message);
+              }
+            }
+          }
+        }
+      }
+
+      // Mark as seen so it is never re-sent
+      db.markClassroomItemSeen(item.id);
+    }
+  } catch (err) {
+    console.error('Error during classroom auto-sync check:', err.message);
+  }
 }
 
 /**
