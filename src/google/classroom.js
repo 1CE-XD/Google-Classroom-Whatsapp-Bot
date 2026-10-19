@@ -242,8 +242,15 @@ export async function downloadDriveFile(fileId, preferredTitle = '') {
     fields: 'id, name, mimeType, size'
   });
 
+  const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB (WhatsApp document limit)
+  if (meta.data.size && parseInt(meta.data.size, 10) > MAX_FILE_SIZE) {
+    throw new Error(`File is too large (${Math.round(meta.data.size / (1024 * 1024))}MB). Maximum downloadable size is 50MB.`);
+  }
+
   const mimeType = meta.data.mimeType || 'application/octet-stream';
-  let fileName = meta.data.name || preferredTitle || 'document';
+  let rawName = meta.data.name || preferredTitle || 'document';
+  // Sanitize filename to avoid control characters or path traversal attempts
+  let fileName = rawName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
 
   let buffer;
 

@@ -15,6 +15,65 @@ let sock = null;
 let botJid = null;
 let cachedFiles = []; // In-memory cache of recent files for !get <number>
 
+// Anti-Spam / Rate Limiting per user (5 commands per 15s window)
+const userCooldowns = new Map();
+const RATE_LIMIT_WINDOW_MS = 15000;
+const MAX_COMMANDS_PER_WINDOW = 5;
+
+/**
+ * Checks if the message sender is the bot owner
+ */
+export function isOwner(msg) {
+  if (!msg) return false;
+  if (msg.key?.fromMe) return true;
+  const ownerNumber = process.env.OWNER_NUMBER?.replace(/[^0-9]/g, '');
+  const senderJid = msg.key?.participant || msg.key?.remoteJid || '';
+  if (ownerNumber && senderJid) {
+    const cleanSender = senderJid.replace(/[^0-9]/g, '');
+    if (cleanSender.includes(ownerNumber)) return true;
+  }
+  return false;
+}
+
+/**
+ * In-memory rate limiter to prevent spam attacks and chat flooding
+ */
+function checkRateLimit(senderJid, isOwnerUser) {
+  if (isOwnerUser) return { allowed: true }; // Owner is never throttled
+
+  const now = Date.now();
+  let record = userCooldowns.get(senderJid);
+
+  if (!record || now > record.resetTime) {
+    record = { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS, warned: false };
+    userCooldowns.set(senderJid, record);
+    return { allowed: true };
+  }
+
+  record.count++;
+  if (record.count > MAX_COMMANDS_PER_WINDOW) {
+    const shouldWarn = !record.warned;
+    record.warned = true;
+    return { allowed: false, shouldWarn };
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Redact internal file paths, API keys, and secrets from user-facing error messages
+ */
+export function sanitizeError(err) {
+  if (!err) return 'An unexpected error occurred.';
+  const msg = typeof err === 'string' ? err : err.message || String(err);
+  return msg
+    .replace(/key=[A-Za-z0-9_\-]+/gi, 'key=[REDACTED]')
+    .replace(/AQ\.[A-Za-z0-9_\-]+/g, '[REDACTED]')
+    .replace(/[a-zA-Z0-9_\-]{35,}/g, '[REDACTED]')
+    .replace(/[A-Za-z]:\\[^\s]+/g, '[REDACTED_PATH]')
+    .replace(/\/[a-zA-Z0-9_.\-\/]+\/[a-zA-Z0-9_.\-]+/g, '[REDACTED_PATH]');
+}
+
 export async function initWhatsAppBot() {
   const authDir = path.resolve('auth_info_baileys');
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -88,11 +147,13 @@ export async function initWhatsAppBot() {
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
       const isMentioned = botJid && mentionedJids.some(jid => jid.includes(botJid.split('@')[0]));
 
+      const isSenderOwner = isOwner(msg);
+
       // 1. Direct Messages (1-on-1 personal chats):
       // NEVER reply to personal chats, friends, or anyone else in DMs!
       // Only the bot owner testing with their own number using a command prefix is allowed.
       if (!isGroup) {
-        if (!msg.key.fromMe || !hasCommandPrefix) {
+        if (!isSenderOwner || !hasCommandPrefix) {
           continue; // 100% silent to all incoming messages from friends/contacts!
         }
       }
@@ -111,10 +172,24 @@ export async function initWhatsAppBot() {
 
         if (!isPermitted && !isActivating) {
           // If group is not authorized yet, stay silent (only owner can activate)
-          if (!msg.key.fromMe) {
+          if (!isSenderOwner) {
             continue; // Ignore completely until owner runs !subscribe
           }
         }
+      }
+
+      // 3. Anti-Spam / Rate Limiting Check:
+      const senderJid = msg.key.participant || remoteJid;
+      const rateStatus = checkRateLimit(senderJid, isSenderOwner);
+      if (!rateStatus.allowed) {
+        if (rateStatus.shouldWarn) {
+          await sendMessage(
+            remoteJid,
+            '⚠️ *Slow down:* You are sending requests too quickly. Please wait a few seconds.',
+            msg
+          );
+        }
+        continue;
       }
 
       console.log(`📩 Incoming command: "${text}" from ${isGroup ? 'Group ' + remoteJid : remoteJid}`);
@@ -368,7 +443,7 @@ Check bot connection status.`;
           await sendMessage(remoteJid, 'ℹ️ The *!subscribe* command is intended for WhatsApp groups.', originalMsg);
           return;
         }
-        if (!originalMsg.key.fromMe) {
+        if (!isOwner(originalMsg)) {
           await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can activate the bot in this group.', originalMsg);
           return;
         }
@@ -382,7 +457,7 @@ Check bot connection status.`;
       }
 
       case 'unsubscribe': {
-        if (!originalMsg.key.fromMe) {
+        if (!isOwner(originalMsg)) {
           await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can deactivate the bot in this group.', originalMsg);
           return;
         }
@@ -448,7 +523,7 @@ Check bot connection status.`;
     }
   } catch (err) {
     console.error(`Error processing command "${command}":`, err);
-    await sendMessage(remoteJid, `❌ *Error:* ${err.message}`, originalMsg);
+    await sendMessage(remoteJid, `❌ *Error:* ${sanitizeError(err.message)}`, originalMsg);
   }
 }
 
