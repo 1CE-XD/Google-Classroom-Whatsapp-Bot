@@ -37,6 +37,25 @@ export function parseDueDate(dueDate, dueTime) {
 }
 
 /**
+ * Format a Date object into human-friendly Date and Time
+ * e.g. "Oct 19, 2026 at 2:30 PM"
+ */
+export function formatDateTime(date) {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  }) + ' at ' + d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+}
+
+/**
  * Extract attachment links and names
  */
 export function extractMaterials(materials = []) {
@@ -98,6 +117,10 @@ export async function getUpcomingAssignments() {
 
         // Only include future assignments
         if (deadline && deadline > now) {
+          const postedAt = item.creationTime
+            ? new Date(item.creationTime)
+            : (item.updateTime ? new Date(item.updateTime) : null);
+
           allAssignments.push({
             id: item.id,
             courseId: course.id,
@@ -106,6 +129,7 @@ export async function getUpcomingAssignments() {
             description: item.description || '',
             alternateLink: item.alternateLink,
             deadline: deadline,
+            postedAt: postedAt,
             materials: extractMaterials(item.materials)
           });
         }
@@ -138,7 +162,7 @@ export async function getRecentCourseMaterials(hoursBack = 720) {
       });
       const materials = matRes.data.courseWorkMaterial || [];
       for (const m of materials) {
-        const updateTime = new Date(m.updateTime || m.creationTime);
+        const updateTime = new Date(m.creationTime || m.updateTime);
         if (updateTime >= cutoff) {
           recentItems.push({
             type: 'material',
@@ -160,7 +184,7 @@ export async function getRecentCourseMaterials(hoursBack = 720) {
       });
       const announcements = annRes.data.announcements || [];
       for (const a of announcements) {
-        const updateTime = new Date(a.updateTime || a.creationTime);
+        const updateTime = new Date(a.creationTime || a.updateTime);
         if (updateTime >= cutoff) {
           recentItems.push({
             type: 'announcement',
@@ -170,6 +194,29 @@ export async function getRecentCourseMaterials(hoursBack = 720) {
             time: updateTime,
             alternateLink: a.alternateLink,
             files: extractMaterials(a.materials)
+          });
+        }
+      }
+
+      // 3. Check Course Work (Assignments and Questions posted)
+      const workRes = await classroom.courses.courseWork.list({
+        courseId: course.id,
+        courseWorkStates: ['PUBLISHED'],
+        pageSize: 25
+      });
+      const coursework = workRes.data.courseWork || [];
+      for (const w of coursework) {
+        const postTime = new Date(w.creationTime || w.updateTime);
+        if (postTime >= cutoff) {
+          recentItems.push({
+            type: 'assignment',
+            courseName: course.name,
+            title: `📝 ${w.title}`,
+            description: w.description || '',
+            time: postTime,
+            deadline: parseDueDate(w.dueDate, w.dueTime),
+            alternateLink: w.alternateLink,
+            files: extractMaterials(w.materials)
           });
         }
       }

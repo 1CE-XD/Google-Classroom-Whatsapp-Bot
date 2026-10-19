@@ -8,7 +8,7 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import path from 'path';
 import { db } from '../storage/db.js';
-import { getUpcomingAssignments, getRecentCourseMaterials, downloadDriveFile } from '../google/classroom.js';
+import { getUpcomingAssignments, getRecentCourseMaterials, downloadDriveFile, formatDateTime } from '../google/classroom.js';
 import { askGemini, clearChatHistory } from '../ai/gemini.js';
 
 let sock = null;
@@ -199,7 +199,13 @@ Check bot connection status.`;
 
           reply += `*${index + 1}. ${a.title}*\n`;
           reply += `📖 *Course:* ${a.courseName}\n`;
-          reply += `⏰ *Due:* ${a.deadline.toLocaleString('en-US', { timeZoneName: 'short' })} ${timeLeft}\n`;
+          if (a.postedAt) {
+            reply += `📅 *Posted:* ${formatDateTime(a.postedAt)}\n`;
+          }
+          reply += `⏰ *Due:* ${formatDateTime(a.deadline)} ${timeLeft}\n`;
+          if (a.description) {
+            reply += `💬 _${a.description.trim()}_\n`;
+          }
           if (a.alternateLink) {
             reply += `🔗 *Link:* ${a.alternateLink}\n`;
           }
@@ -248,8 +254,17 @@ Check bot connection status.`;
         recentItems.slice(0, 10).forEach((item) => {
           reply += `📖 *Course:* ${item.courseName}\n`;
           reply += `📌 *${item.title}*\n`;
+          if (item.time) {
+            reply += `📅 *Posted:* ${formatDateTime(item.time)}\n`;
+          }
+          if (item.deadline) {
+            reply += `⏰ *Due:* ${formatDateTime(item.deadline)}\n`;
+          }
           if (item.description) {
             reply += `💬 _${item.description.trim()}_\n`;
+          }
+          if (item.alternateLink) {
+            reply += `🔗 *Link:* ${item.alternateLink}\n`;
           }
           if (item.files && item.files.length > 0) {
             reply += `📎 *Files:*\n`;

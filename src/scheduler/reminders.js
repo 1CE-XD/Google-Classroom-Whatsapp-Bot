@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { db } from '../storage/db.js';
-import { getUpcomingAssignments } from '../google/classroom.js';
+import { getUpcomingAssignments, formatDateTime } from '../google/classroom.js';
 import { sendMessage, getSocket } from '../whatsapp/bot.js';
 
 export function startScheduler() {
@@ -59,7 +59,9 @@ export async function checkAssignmentReminders() {
         const message = `${reminderHeader}\n\n` +
           `📖 *Course:* ${a.courseName}\n` +
           `📝 *Assignment:* ${a.title}\n` +
-          `⏰ *Due Time:* ${a.deadline.toLocaleString('en-US', { timeZoneName: 'short' })}\n` +
+          (a.postedAt ? `📅 *Posted:* ${formatDateTime(a.postedAt)}\n` : '') +
+          `⏰ *Due Time:* ${formatDateTime(a.deadline)}\n` +
+          (a.description ? `💬 _${a.description.trim()}_\n` : '') +
           (a.alternateLink ? `🔗 *Submission Link:* ${a.alternateLink}\n` : '') +
           (a.materials?.length ? `📎 *Materials:* ${a.materials.map(m => m.title).join(', ')}\n` : '');
 
