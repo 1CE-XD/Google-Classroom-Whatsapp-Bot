@@ -14,7 +14,8 @@ import {
   downloadDriveFile,
   formatDateTime,
   getCoursesList,
-  findCourseByQuery
+  findCourseByQuery,
+  getClassroomContextSummary
 } from '../google/classroom.js';
 import { askGemini, clearChatHistory, getModelsListText, setPreferredModel, getPreferredModel } from '../ai/gemini.js';
 
@@ -702,7 +703,8 @@ Check bot connection and auto-sync status.`;
         }
 
         await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
-        const reply = await askGemini(question, remoteJid);
+        const classroomContext = await getClassroomContextSummary();
+        const reply = await askGemini(question, remoteJid, classroomContext);
         await sendMessage(remoteJid, reply, originalMsg);
         break;
       }
@@ -739,8 +741,9 @@ Check bot connection and auto-sync status.`;
         if (isMentioned) {
           const question = rawText.replace(/@\d+/g, '').replace(/^[!/.#]/, '').trim();
           if (question.length > 3) {
-            await sendMessage(remoteJid, '🤖 *Gemini is thinking...*', originalMsg);
-            const reply = await askGemini(question, remoteJid);
+            await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
+            const classroomContext = await getClassroomContextSummary();
+            const reply = await askGemini(question, remoteJid, classroomContext);
             await sendMessage(remoteJid, reply, originalMsg);
           }
         }

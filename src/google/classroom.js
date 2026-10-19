@@ -337,3 +337,93 @@ export async function downloadDriveFile(fileId, preferredTitle = '') {
     size: buffer.length
   };
 }
+
+let cachedClassroomContext = {
+  data: '',
+  timestamp: 0
+};
+
+/**
+ * Builds a structured, real-time context summary of Google Classroom
+ * for the AI model (upcoming assignments, recent posts, enrolled courses, bot commands)
+ * Cached for 2 minutes to ensure fast response times
+ */
+export async function getClassroomContextSummary(forceFresh = false) {
+  const now = Date.now();
+  if (!forceFresh && cachedClassroomContext.data && (now - cachedClassroomContext.timestamp < 120000)) {
+    return cachedClassroomContext.data;
+  }
+
+  try {
+    const [courses, assignments, recent] = await Promise.all([
+      getCoursesList().catch(() => []),
+      getUpcomingAssignments().catch(() => []),
+      getRecentCourseMaterials(168).catch(() => []) // past 7 days
+    ]);
+
+    const currentTimeStr = new Date().toLocaleString('en-US', {
+      weekday: 'long',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+
+    let summary = `[CURRENT REAL-WORLD DATE & TIME]: ${currentTimeStr}\n\n`;
+
+    summary += `[BOT CAPABILITIES & WHATSAPP COMMANDS]:\n` +
+      `- !courses or !cls: List all enrolled Google Classrooms with numbers\n` +
+      `- !due or !due <number>: View upcoming assignment deadlines (e.g. !due 1)\n` +
+      `- !recent or !recent <number>: View recently uploaded study materials, files, and announcements\n` +
+      `- !get <number>: Download and receive PDFs/documents directly in WhatsApp (e.g. !get 1)\n` +
+      `- !autosync <number>: Automatically send new classroom updates & files to this group\n` +
+      `- !models or !model <name>: View and switch AI models (auto, lite, flash, preview)\n` +
+      `- !clear or !reset: Clear conversation memory\n` +
+      `- !subscribe / !unsubscribe: Enable/disable group deadline reminders (alerted at 24h & 2h before due time)\n\n`;
+
+    summary += `[ENROLLED GOOGLE CLASSROOMS (${courses.length})]:\n`;
+    courses.forEach(c => {
+      summary += `- [${c.index}] ${c.name}${c.section ? ` (${c.section})` : ''}\n`;
+    });
+    summary += `\n`;
+
+    summary += `[UPCOMING ASSIGNMENTS & DEADLINES (${assignments.length})]:\n`;
+    if (assignments.length === 0) {
+      summary += `No upcoming assignments due at this time.\n`;
+    } else {
+      assignments.forEach((a, i) => {
+        summary += `${i + 1}. "${a.title}" in course "${a.courseName}"\n`;
+        if (a.postedAt) summary += `   Posted: ${formatDateTime(a.postedAt)}\n`;
+        summary += `   Due Date: ${formatDateTime(a.deadline)}\n`;
+        if (a.description) summary += `   Instructions: ${a.description.slice(0, 300)}\n`;
+        if (a.materials?.length) summary += `   Files: ${a.materials.map(m => m.title).join(', ')}\n`;
+        if (a.alternateLink) summary += `   Submission Link: ${a.alternateLink}\n`;
+      });
+    }
+    summary += `\n`;
+
+    summary += `[RECENT CLASSROOM POSTS & ANNOUNCEMENTS (Past 7 Days)]:\n`;
+    if (recent.length === 0) {
+      summary += `No materials or announcements posted in the past 7 days.\n`;
+    } else {
+      recent.slice(0, 8).forEach((r, i) => {
+        summary += `${i + 1}. [${r.type.toUpperCase()}] "${r.title}" in "${r.courseName}"\n`;
+        if (r.time) summary += `   Posted: ${formatDateTime(r.time)}\n`;
+        if (r.description) summary += `   Content: ${r.description.slice(0, 200)}\n`;
+        if (r.files?.length) summary += `   Attachments: ${r.files.map(f => f.title).join(', ')}\n`;
+      });
+    }
+
+    cachedClassroomContext = {
+      data: summary.trim(),
+      timestamp: now
+    };
+
+    return cachedClassroomContext.data;
+  } catch (err) {
+    console.error('Failed to build classroom context summary:', err.message);
+    return cachedClassroomContext.data || '';
+  }
+}
