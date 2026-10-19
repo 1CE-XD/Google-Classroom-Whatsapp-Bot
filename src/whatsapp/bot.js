@@ -164,20 +164,8 @@ export async function initWhatsAppBot() {
       const remoteJid = msg.key.remoteJid;
       const isGroup = remoteJid.endsWith('@g.us');
 
-      // Supported command keywords
-      const COMMAND_KEYWORDS = [
-        'help', 'commands', 'menu',
-        'due', 'assignments',
-        'recent', 'files', 'materials', 'get', 'download', 'file',
-        'ai', 'ask', 'gemini', 'reset', 'clear',
-        'subscribe', 'unsubscribe', 'status',
-        'courses', 'classes', 'cls',
-        'autosync', 'sync',
-        'model', 'models'
-      ];
-
-      // Accepts both prefixed (!cls, /cls, #cls, .cls) and direct commands (cls, courses, help, due, recent, etc.)
-      const commandPattern = new RegExp(`^([!/.#])?(${COMMAND_KEYWORDS.join('|')})(\\s+.*)?$`, 'i');
+      // Commands MUST start with an explicit prefix (!, /, ., or #) to prevent triggering on normal conversation!
+      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?)(\s+.*)?$/i;
       const hasCommandPrefix = commandPattern.test(text);
 
       // In groups, check if bot is mentioned
@@ -196,7 +184,7 @@ export async function initWhatsAppBot() {
       }
 
       // 2. Groups:
-      // Must have a command prefix/keyword OR the bot must be explicitly @tagged
+      // Must have an explicit command prefix (!due, !recent, !ai) OR the bot must be explicitly @tagged
       if (isGroup) {
         if (!isMentioned && !hasCommandPrefix) {
           continue; // 100% silent during normal group conversations!
@@ -251,9 +239,11 @@ export async function initWhatsAppBot() {
  * Handle incoming bot commands
  */
 async function handleCommand(remoteJid, rawText, isGroup, originalMsg) {
-  // Normalize text by removing bot mention tags
+  // Normalize text and extract command & arguments cleanly
   const cleanText = rawText.replace(/@\d+/g, '').trim().toLowerCase();
-  const command = cleanText.split(/\s+/)[0].replace(/^[!/.#]/, '');
+  const parts = cleanText.split(/\s+/);
+  const command = parts[0].replace(/^[!/.#]/, '');
+  const commandArgs = parts.slice(1).join(' ').trim();
 
   try {
     switch (command) {
@@ -301,7 +291,7 @@ Check bot connection and auto-sync status.`;
       case 'courses':
       case 'classes':
       case 'cls': {
-        const arg = cleanText.replace(/^[!/.#]?(courses|classes|cls)\s*/i, '').trim();
+        const arg = commandArgs;
 
         // 1. Reset / Clear Selection
         if (arg === 'all' || arg === 'reset' || arg === '0' || arg === 'clear' || arg === 'none') {
@@ -404,7 +394,7 @@ Check bot connection and auto-sync status.`;
 
       case 'due':
       case 'assignments': {
-        const query = cleanText.replace(/^[!/.#]?(due|assignments)\s*/i, '').trim();
+        const query = commandArgs;
         let targetCourse = null;
 
         if (query) {
@@ -494,7 +484,7 @@ Check bot connection and auto-sync status.`;
       case 'recent':
       case 'files':
       case 'materials': {
-        const query = cleanText.replace(/^[!/.#]?(recent|files|materials)\s*/i, '').trim();
+        const query = commandArgs;
         let targetCourse = null;
 
         if (query) {
@@ -616,7 +606,7 @@ Check bot connection and auto-sync status.`;
           return;
         }
 
-        const arg = cleanText.replace(/^[!/.#]?(autosync|sync)\s*/i, '').trim();
+        const arg = commandArgs;
 
         // 1. If no argument provided, display current status
         if (!arg) {
@@ -694,7 +684,7 @@ Check bot connection and auto-sync status.`;
       case 'get':
       case 'download':
       case 'file': {
-        const query = cleanText.replace(/^[!/.#]?(get|download|file)\s*/i, '').trim();
+        const query = commandArgs;
 
         if (!query) {
           await sendMessage(
@@ -843,7 +833,7 @@ Check bot connection and auto-sync status.`;
 
       case 'model':
       case 'models': {
-        const arg = cleanText.replace(/^[!/.#]?(model|models)\s*/i, '').trim();
+        const arg = commandArgs;
 
         if (!arg) {
           const listText = getModelsListText(remoteJid);

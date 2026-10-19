@@ -99,9 +99,19 @@ export function getPreferredModel(chatId) {
  */
 export function setPreferredModel(chatId, modelKey) {
   const clean = modelKey.toLowerCase().trim();
-  if (AVAILABLE_MODELS[clean]) {
-    chatModelPreferences.set(chatId, clean);
-    return AVAILABLE_MODELS[clean];
+  const aliases = {
+    'heavy': process.env.GROQ_API_KEY ? 'r1' : '3.8',
+    'pro': process.env.GROQ_API_KEY ? 'llama3' : '3.8',
+    'deep': 'r1',
+    'fast': 'lite',
+    'speed': 'lite',
+    'default': 'auto'
+  };
+  const targetKey = aliases[clean] || clean;
+
+  if (AVAILABLE_MODELS[targetKey]) {
+    chatModelPreferences.set(chatId, targetKey);
+    return AVAILABLE_MODELS[targetKey];
   }
   return null;
 }
