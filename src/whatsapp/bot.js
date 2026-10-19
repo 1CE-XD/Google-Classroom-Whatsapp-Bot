@@ -88,16 +88,33 @@ export async function initWhatsAppBot() {
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
       const isMentioned = botJid && mentionedJids.some(jid => jid.includes(botJid.split('@')[0]));
 
-      // If the message was sent by the bot owner:
-      // Allow it only if it explicitly starts with a command prefix (e.g. !help, !due)
-      // Otherwise skip normal chat to avoid loops
-      if (msg.key.fromMe && !hasCommandPrefix) {
-        continue;
+      // 1. Direct Messages (1-on-1 personal chats):
+      // NEVER reply to personal chats, friends, or anyone else in DMs!
+      // Only the bot owner testing with their own number using a command prefix is allowed.
+      if (!isGroup) {
+        if (!msg.key.fromMe || !hasCommandPrefix) {
+          continue; // 100% silent to all incoming messages from friends/contacts!
+        }
       }
 
-      // In groups: respond if mentioned OR has command prefix
-      if (isGroup && !isMentioned && !hasCommandPrefix) {
-        continue;
+      // 2. Groups:
+      // Must have an explicit command prefix (!due, !recent, !ai) OR the bot must be explicitly @tagged
+      if (isGroup) {
+        if (!isMentioned && !hasCommandPrefix) {
+          continue; // 100% silent during normal group conversations!
+        }
+
+        // Group Permission Check:
+        // Group members can only use the bot if the owner has authorized the group using !subscribe
+        const isPermitted = db.isSubscribed(remoteJid);
+        const isActivating = /^[!/.#](subscribe)/i.test(text);
+
+        if (!isPermitted && !isActivating) {
+          // If group is not authorized yet, stay silent (only owner can activate)
+          if (!msg.key.fromMe) {
+            continue; // Ignore completely until owner runs !subscribe
+          }
+        }
       }
 
       console.log(`📩 Incoming command: "${text}" from ${isGroup ? 'Group ' + remoteJid : remoteJid}`);
@@ -333,24 +350,32 @@ Check bot connection status.`;
 
       case 'subscribe': {
         if (!isGroup) {
-          await sendMessage(remoteJid, 'ℹ️ The *!subscribe* command is intended for WhatsApp groups so all members receive automated deadline reminders.', originalMsg);
+          await sendMessage(remoteJid, 'ℹ️ The *!subscribe* command is intended for WhatsApp groups.', originalMsg);
+          return;
+        }
+        if (!msg.key.fromMe) {
+          await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can activate the bot in this group.', originalMsg);
           return;
         }
         const added = db.addSubscriber(remoteJid);
         if (added) {
-          await sendMessage(remoteJid, '✅ *This group is now subscribed to automated assignment reminders!* Reminders will be posted 24 hours and 2 hours before due dates.', originalMsg);
+          await sendMessage(remoteJid, '✅ *Bot activated in this group!* Group members can now use !due, !recent, !get, and !ai.', originalMsg);
         } else {
-          await sendMessage(remoteJid, 'ℹ️ This group is already subscribed to automated reminders.', originalMsg);
+          await sendMessage(remoteJid, 'ℹ️ This group is already activated.', originalMsg);
         }
         break;
       }
 
       case 'unsubscribe': {
+        if (!msg.key.fromMe) {
+          await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can deactivate the bot in this group.', originalMsg);
+          return;
+        }
         const removed = db.removeSubscriber(remoteJid);
         if (removed) {
-          await sendMessage(remoteJid, '🔕 *This group has been unsubscribed from automated reminders.*', originalMsg);
+          await sendMessage(remoteJid, '🔕 *Bot deactivated in this group.*', originalMsg);
         } else {
-          await sendMessage(remoteJid, 'ℹ️ This group was not subscribed to reminders.', originalMsg);
+          await sendMessage(remoteJid, 'ℹ️ This group was not active.', originalMsg);
         }
         break;
       }
@@ -360,7 +385,7 @@ Check bot connection status.`;
         let reply = `🤖 *Bot Status*\n` +
           `• Connection: ✅ Active & Ready\n`;
         if (isGroup) {
-          reply += `• Group Reminders: ${subscribed ? '🔔 Enabled (24h & 2h alerts)' : '🔕 Disabled (type !subscribe to enable)'}`;
+          reply += `• Group Permissions: ${subscribed ? '🟢 Activated' : '🔴 Deactivated (owner must type !subscribe)'}`;
         }
         await sendMessage(remoteJid, reply, originalMsg);
         break;
@@ -393,15 +418,16 @@ Check bot connection status.`;
       }
 
       default: {
-        // If mentioned in a group with a natural question, or direct messaged, ask Gemini!
-        const question = rawText.replace(/@\d+/g, '').replace(/^[!/.#]/, '').trim();
-        if (question.length > 3) {
-          await sendMessage(remoteJid, '🤖 *Gemini is thinking...*', originalMsg);
-          const reply = await askGemini(question, remoteJid);
-          await sendMessage(remoteJid, reply, originalMsg);
-        } else if (!isGroup) {
-          await sendMessage(remoteJid, '❓ Type *!help* to see available commands.', originalMsg);
+        // If explicitly @mentioned in a group with a natural question, ask Gemini!
+        if (isMentioned) {
+          const question = rawText.replace(/@\d+/g, '').replace(/^[!/.#]/, '').trim();
+          if (question.length > 3) {
+            await sendMessage(remoteJid, '🤖 *Gemini is thinking...*', originalMsg);
+            const reply = await askGemini(question, remoteJid);
+            await sendMessage(remoteJid, reply, originalMsg);
+          }
         }
+        // Do NOT reply to unrecognized messages or normal chatting!
         break;
       }
     }
