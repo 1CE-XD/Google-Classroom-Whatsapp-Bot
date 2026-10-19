@@ -11,6 +11,7 @@ if (!fs.existsSync(path.dirname(DB_PATH))) {
 const defaultData = {
   subscribedGroups: [], // JIDs of groups where reminders should be posted
   autoSyncGroups: {}, // { [groupJid]: { enabled: true, courseId: null, courseName: 'All', autoUploadFiles: true } }
+  selectedCourses: {}, // { [chatJid]: { id, name, index } } - active classroom selected per chat
   seenClassroomItems: [], // [itemId] of materials/announcements/coursework already processed
   classroomSeeded: false, // true once initial history is indexed to avoid spamming old items
   alertedAssignments: {}, // { assignmentId: [reminderStages: '24h', '2h', etc.] }
@@ -162,5 +163,32 @@ export const db = {
     const data = readDb();
     data.classroomSeeded = seeded;
     writeDb(data);
+  },
+
+  setSelectedCourse(jid, courseId, courseName, courseIndex) {
+    const data = readDb();
+    if (!data.selectedCourses) data.selectedCourses = {};
+    data.selectedCourses[jid] = {
+      id: courseId,
+      name: courseName,
+      index: courseIndex,
+      updatedAt: new Date().toISOString()
+    };
+    writeDb(data);
+  },
+
+  getSelectedCourse(jid) {
+    const data = readDb();
+    return data.selectedCourses?.[jid] || null;
+  },
+
+  clearSelectedCourse(jid) {
+    const data = readDb();
+    if (data.selectedCourses && data.selectedCourses[jid]) {
+      delete data.selectedCourses[jid];
+      writeDb(data);
+      return true;
+    }
+    return false;
   }
 };

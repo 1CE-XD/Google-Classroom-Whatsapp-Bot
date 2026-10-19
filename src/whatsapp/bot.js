@@ -35,11 +35,26 @@ const MAX_COMMANDS_PER_WINDOW = 5;
 export function isOwner(msg) {
   if (!msg) return false;
   if (msg.key?.fromMe) return true;
-  const ownerNumber = process.env.OWNER_NUMBER?.replace(/[^0-9]/g, '');
+
+  // Bot's own session ID and LID
+  const botNumber = sock?.user?.id?.replace(/[^0-9]/g, '') || 'REDACTED_NUMBER';
+  const botLid = sock?.user?.lid?.replace(/[^0-9]/g, '') || 'REDACTED_LID';
+
+  // Configured owner numbers from .env (supports comma-separated list)
+  const envOwners = (process.env.OWNER_NUMBER || 'REDACTED_NUMBER')
+    .split(',')
+    .map(n => n.replace(/[^0-9]/g, ''))
+    .filter(Boolean);
+
+  const allowedIds = new Set([botNumber, botLid, ...envOwners]);
+
   const senderJid = msg.key?.participant || msg.key?.remoteJid || '';
-  if (ownerNumber && senderJid) {
-    const cleanSender = senderJid.replace(/[^0-9]/g, '');
-    if (cleanSender.includes(ownerNumber)) return true;
+  const cleanSender = senderJid.replace(/[^0-9]/g, '');
+
+  if (cleanSender) {
+    for (const id of allowedIds) {
+      if (cleanSender.includes(id) || id.includes(cleanSender)) return true;
+    }
   }
   return false;
 }
@@ -149,8 +164,21 @@ export async function initWhatsAppBot() {
       const remoteJid = msg.key.remoteJid;
       const isGroup = remoteJid.endsWith('@g.us');
 
-      // Check if command starts with a supported prefix
-      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|model|models)/i.test(text);
+      // Supported command keywords
+      const COMMAND_KEYWORDS = [
+        'help', 'commands', 'menu',
+        'due', 'assignments',
+        'recent', 'files', 'materials', 'get', 'download', 'file',
+        'ai', 'ask', 'gemini', 'reset', 'clear',
+        'subscribe', 'unsubscribe', 'status',
+        'courses', 'classes', 'cls',
+        'autosync', 'sync',
+        'model', 'models'
+      ];
+
+      // Accepts both prefixed (!cls, /cls, #cls, .cls) and direct commands (cls, courses, help, due, recent, etc.)
+      const commandPattern = new RegExp(`^([!/.#])?(${COMMAND_KEYWORDS.join('|')})(\\s+.*)?$`, 'i');
+      const hasCommandPrefix = commandPattern.test(text);
 
       // In groups, check if bot is mentioned
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -168,7 +196,7 @@ export async function initWhatsAppBot() {
       }
 
       // 2. Groups:
-      // Must have an explicit command prefix (!due, !recent, !ai) OR the bot must be explicitly @tagged
+      // Must have a command prefix/keyword OR the bot must be explicitly @tagged
       if (isGroup) {
         if (!isMentioned && !hasCommandPrefix) {
           continue; // 100% silent during normal group conversations!
@@ -192,7 +220,7 @@ export async function initWhatsAppBot() {
                 msg
               );
             }
-            continue; // Prior to owner subscription, no one else can run any command!
+            continue; // Prior to owner subscription, non-owners cannot run commands!
           }
         }
       }
@@ -211,7 +239,7 @@ export async function initWhatsAppBot() {
         continue;
       }
 
-      console.log(`📩 Incoming command: "${text}" from ${isGroup ? 'Group ' + remoteJid : remoteJid}`);
+      console.log(`📩 Incoming command: "${text}" from ${isGroup ? 'Group ' + remoteJid : remoteJid} (Sender: ${senderJid}, isOwner: ${isSenderOwner})`);
       await handleCommand(remoteJid, text, isGroup, msg);
     }
   });
@@ -237,13 +265,13 @@ async function handleCommand(remoteJid, rawText, isGroup, originalMsg) {
 Here are the available commands:
 
 📚 *!courses* or *!cls*
-List all enrolled Google Classrooms with numbers ([1], [2], etc.).
+List all enrolled classrooms. Type *!cls 1* to focus this chat on course 1, or *!cls all* to reset!
 
 📌 *!due* or *!due <number>*
-View upcoming assignments and deadlines (optionally filtered by classroom number).
+View upcoming assignments and deadlines (focused on active course, or all courses).
 
 📁 *!recent* or *!recent <number>*
-View recently posted materials, files, and announcements (optionally filtered by classroom).
+View recently posted materials, files, and announcements (focused on active course, or all courses).
 
 📥 *!get <number>* or *!download <number>*
 Download and send the actual PDF/document directly into this WhatsApp chat!
@@ -273,6 +301,75 @@ Check bot connection and auto-sync status.`;
       case 'courses':
       case 'classes':
       case 'cls': {
+        const arg = cleanText.replace(/^[!/.#]?(courses|classes|cls)\s*/i, '').trim();
+
+        // 1. Reset / Clear Selection
+        if (arg === 'all' || arg === 'reset' || arg === '0' || arg === 'clear' || arg === 'none') {
+          db.clearSelectedCourse(remoteJid);
+          await sendMessage(
+            remoteJid,
+            '🔄 *Classroom selection cleared.* Now *!recent* and *!due* will include all enrolled classrooms by default!',
+            originalMsg
+          );
+          return;
+        }
+
+        // 2. Select a specific course if an argument is provided (e.g. !cls 1 or cls 2)
+        if (arg) {
+          await sendMessage(remoteJid, `⏳ Searching for classroom "${arg}"...`, originalMsg);
+          const course = await findCourseByQuery(arg);
+
+          if (!course) {
+            await sendMessage(
+              remoteJid,
+              `❌ *Classroom not found for "${arg}".*\n👉 Type *!cls* or *!courses* to see the list of available classrooms and their numbers.`,
+              originalMsg
+            );
+            return;
+          }
+
+          // Save selected course for this chat in db
+          db.setSelectedCourse(remoteJid, course.id, course.name, course.index);
+
+          // Fetch quick overview for this selected course
+          const [assignments, recentItems] = await Promise.all([
+            getUpcomingAssignments(course.id).catch(() => []),
+            getRecentCourseMaterials(720, course.id).catch(() => [])
+          ]);
+
+          let reply = `✅ *Active Classroom Selected: [${course.index}] ${course.name}* 🎯\n`;
+          if (course.section) reply += `_Section: ${course.section}_\n`;
+          reply += `\n📌 *From now on in this chat:*\n` +
+            `• *!recent* will automatically show uploads for *${course.name}*\n` +
+            `• *!due* will automatically show assignments for *${course.name}*\n` +
+            `• Type *!cls all* anytime to reset back to all classrooms.\n\n`;
+
+          // Quick status summary for this course
+          if (assignments.length > 0) {
+            reply += `📝 *Upcoming Deadlines (${assignments.length})*:\n`;
+            assignments.slice(0, 3).forEach((a, i) => {
+              reply += `  ${i + 1}. ${a.title} (Due: ${formatDateTime(a.deadline)})\n`;
+            });
+            reply += `\n`;
+          } else {
+            reply += `🎉 *No upcoming assignments due right now!*\n\n`;
+          }
+
+          if (recentItems.length > 0) {
+            reply += `📂 *Recent Uploads (${recentItems.length} found)*:\n`;
+            recentItems.slice(0, 3).forEach((item) => {
+              reply += `  • ${item.title}\n`;
+            });
+            reply += `\n👉 Type *!recent* to view full details and downloadable files!`;
+          } else {
+            reply += `📂 No files or posts from the past month for this course.`;
+          }
+
+          await sendMessage(remoteJid, reply.trim(), originalMsg);
+          return;
+        }
+
+        // 3. No argument provided: List all enrolled classrooms
         await sendMessage(remoteJid, '⏳ Fetching enrolled Google Classrooms...', originalMsg);
         const courses = await getCoursesList();
 
@@ -281,16 +378,24 @@ Check bot connection and auto-sync status.`;
           return;
         }
 
+        const currentSelected = db.getSelectedCourse(remoteJid);
+
         let reply = `📚 *Enrolled Google Classrooms (${courses.length})*:\n\n`;
         courses.forEach((c) => {
-          reply += `*[${c.index}] ${c.name}*\n`;
+          const isSelected = currentSelected && currentSelected.id === c.id;
+          reply += `*[${c.index}] ${c.name}* ${isSelected ? '🎯 *(Active in this chat)*' : ''}\n`;
           if (c.section) reply += `   _Section: ${c.section}_\n`;
         });
 
-        reply += `\n💡 *Classroom-specific commands:*\n` +
-          `👉 *!recent 1* — View recent files & uploads for course 1\n` +
-          `👉 *!due 1* — View upcoming assignments for course 1\n` +
-          `👉 *!autosync 1* — Auto-upload new files & posts from course 1 to this group\n` +
+        if (currentSelected) {
+          reply += `\n🎯 *Currently Active:* [${currentSelected.index}] ${currentSelected.name}\n` +
+            `_(Commands !recent and !due currently focus on this classroom)_\n`;
+        }
+
+        reply += `\n💡 *Classroom Selection & Commands:*\n` +
+          `👉 *!cls 1* — Focus this chat on classroom [1] (so *!recent* and *!due* show its updates)\n` +
+          `👉 *!cls all* — Clear selection and show all classrooms\n` +
+          `👉 *!autosync 1* — (Owner) Auto-upload new posts & files from [1] directly into this group\n` +
           `👉 *!autosync all* — Auto-upload from ALL classrooms to this group`;
 
         await sendMessage(remoteJid, reply.trim(), originalMsg);
@@ -311,6 +416,12 @@ Check bot connection and auto-sync status.`;
               originalMsg
             );
             return;
+          }
+        } else {
+          // If no query passed, check if there is an active classroom selected for this chat
+          const selected = db.getSelectedCourse(remoteJid);
+          if (selected) {
+            targetCourse = { id: selected.id, name: selected.name, index: selected.index };
           }
         }
 
@@ -395,6 +506,12 @@ Check bot connection and auto-sync status.`;
               originalMsg
             );
             return;
+          }
+        } else {
+          // If no query passed, check if there is an active classroom selected for this chat
+          const selected = db.getSelectedCourse(remoteJid);
+          if (selected) {
+            targetCourse = { id: selected.id, name: selected.name, index: selected.index };
           }
         }
 
@@ -685,12 +802,14 @@ Check bot connection and auto-sync status.`;
       case 'status': {
         const subscribed = isGroup ? db.isSubscribed(remoteJid) : null;
         const autoSync = isGroup ? db.getGroupAutoSync(remoteJid) : null;
+        const selected = db.getSelectedCourse(remoteJid);
         let reply = `🤖 *Bot Status*\n` +
           `• Connection: ✅ Active & Ready\n`;
         if (isGroup) {
           reply += `• Group Permissions: ${subscribed ? '🟢 Activated' : '🔴 Deactivated (owner must type !subscribe)'}\n`;
           reply += `• Live Auto-Sync: ${autoSync && autoSync.enabled ? `🟢 Active (${autoSync.courseName})` : '🔴 Inactive (type !autosync)'}\n`;
         }
+        reply += `• Active Classroom: ${selected ? `🎯 [${selected.index}] ${selected.name}` : '🌐 All Classrooms (type !cls <num> to focus)'}\n`;
         await sendMessage(remoteJid, reply.trim(), originalMsg);
         break;
       }
