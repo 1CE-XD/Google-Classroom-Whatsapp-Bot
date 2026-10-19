@@ -353,7 +353,7 @@ Check bot connection status.`;
           await sendMessage(remoteJid, 'ℹ️ The *!subscribe* command is intended for WhatsApp groups.', originalMsg);
           return;
         }
-        if (!msg.key.fromMe) {
+        if (!originalMsg.key.fromMe) {
           await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can activate the bot in this group.', originalMsg);
           return;
         }
@@ -367,7 +367,7 @@ Check bot connection status.`;
       }
 
       case 'unsubscribe': {
-        if (!msg.key.fromMe) {
+        if (!originalMsg.key.fromMe) {
           await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can deactivate the bot in this group.', originalMsg);
           return;
         }
