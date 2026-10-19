@@ -22,6 +22,7 @@ import { askGemini, clearChatHistory, getModelsListText, setPreferredModel, getP
 let sock = null;
 let botJid = null;
 let cachedFiles = []; // In-memory cache of recent files for !get <number>
+const unactivatedGroupWarned = new Set(); // Tracks unactivated groups that received the one-time warning
 
 // Anti-Spam / Rate Limiting per user (5 commands per 15s window)
 const userCooldowns = new Map();
@@ -176,12 +177,22 @@ export async function initWhatsAppBot() {
         // Group Permission Check:
         // Group members can only use the bot if the owner has authorized the group using !subscribe
         const isPermitted = db.isSubscribed(remoteJid);
-        const isActivating = /^[!/.#](subscribe)/i.test(text);
 
-        if (!isPermitted && !isActivating) {
-          // If group is not authorized yet, stay silent (only owner can activate)
+        if (!isPermitted) {
+          // If group is not authorized yet, non-owners cannot use ANY command.
+          // The bot replies ONLY ONCE per group to let them know the owner must activate it first.
           if (!isSenderOwner) {
-            continue; // Ignore completely until owner runs !subscribe
+            if (!unactivatedGroupWarned.has(remoteJid)) {
+              unactivatedGroupWarned.add(remoteJid);
+              await sendMessage(
+                remoteJid,
+                '🔒 *Bot Not Activated in this Group*\n\n' +
+                'The bot owner must first activate the bot in this group by typing *!subscribe*.\n' +
+                '_(Until the owner subscribes, all bot commands are disabled for members)_',
+                msg
+              );
+            }
+            continue; // Prior to owner subscription, no one else can run any command!
           }
         }
       }
@@ -647,8 +658,9 @@ Check bot connection and auto-sync status.`;
           return;
         }
         const added = db.addSubscriber(remoteJid);
+        unactivatedGroupWarned.delete(remoteJid);
         if (added) {
-          await sendMessage(remoteJid, '✅ *Bot activated in this group!* Group members can now use !due, !recent, !get, and !ai.', originalMsg);
+          await sendMessage(remoteJid, '✅ *Bot activated in this group!* Group members can now use !due, !recent, !get, !courses, and !ai.', originalMsg);
         } else {
           await sendMessage(remoteJid, 'ℹ️ This group is already activated.', originalMsg);
         }
@@ -661,6 +673,7 @@ Check bot connection and auto-sync status.`;
           return;
         }
         const removed = db.removeSubscriber(remoteJid);
+        unactivatedGroupWarned.delete(remoteJid);
         if (removed) {
           await sendMessage(remoteJid, '🔕 *Bot deactivated in this group.*', originalMsg);
         } else {
