@@ -24,6 +24,26 @@ let botJid = null;
 let cachedFiles = []; // In-memory cache of recent files for !get <number>
 const unactivatedGroupWarned = new Set(); // Tracks unactivated groups that received the one-time warning
 
+// Rolling in-memory message buffer for group chats (tracks recent messages for !summarize)
+const groupChatBuffers = new Map(); // Map<groupJid, Array<{ sender: string, text: string, time: string }>>
+const MAX_GROUP_BUFFER = 100;
+
+function bufferGroupMessage(groupJid, msgObj) {
+  if (!groupChatBuffers.has(groupJid)) {
+    groupChatBuffers.set(groupJid, []);
+  }
+  const buffer = groupChatBuffers.get(groupJid);
+  buffer.push(msgObj);
+  if (buffer.length > MAX_GROUP_BUFFER) {
+    buffer.shift();
+  }
+}
+
+export function getGroupMessages(groupJid, limit = 100) {
+  const buffer = groupChatBuffers.get(groupJid) || [];
+  return buffer.slice(-limit);
+}
+
 // Anti-Spam / Rate Limiting per user (5 commands per 15s window)
 const userCooldowns = new Map();
 const RATE_LIMIT_WINDOW_MS = 15000;
@@ -175,8 +195,18 @@ export async function initWhatsAppBot() {
       const isGroup = remoteJid.endsWith('@g.us');
 
       // Commands MUST start with an explicit prefix (!, /, ., or #) to prevent triggering on normal conversation!
-      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?)(\s+.*)?$/i;
+      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary)(\s+.*)?$/i;
       const hasCommandPrefix = commandPattern.test(text);
+
+      // In subscribed groups, buffer non-command messages for !summarize (last 100 messages)
+      if (isGroup && db.isSubscribed(remoteJid) && !hasCommandPrefix && !msg.key.fromMe) {
+        const senderName = msg.pushName || (msg.key.participant ? msg.key.participant.replace(/[^0-9]/g, '').slice(-4) : 'Member');
+        bufferGroupMessage(remoteJid, {
+          sender: senderName,
+          text: text,
+          time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+        });
+      }
 
       // In groups, check if bot is mentioned
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -281,6 +311,9 @@ Download and send the actual PDF/document directly into this WhatsApp chat!
 
 🤖 *!ai <question>* or tag *@bot <question>*
 Ask AI with conversational memory.
+
+📋 *!summarize* or *!summarize <number>*
+Summarize recent group chats and discussions (e.g. *!summarize 50* or *!summarize 100*)!
 
 ⚙️ *!models* or *!model <name>*
 View & switch free AI models (auto, lite, flash, preview, r1, llama3).
@@ -821,6 +854,61 @@ Check bot connection and auto-sync status.`;
         break;
       }
 
+      case 'summarize':
+      case 'summary': {
+        if (!isGroup) {
+          await sendMessage(remoteJid, 'ℹ️ The *!summarize* command is intended for WhatsApp groups to summarize discussions!', originalMsg);
+          break;
+        }
+
+        let count = 50;
+        if (commandArgs) {
+          const parsed = parseInt(commandArgs, 10);
+          if (!isNaN(parsed) && parsed > 0) {
+            count = Math.min(parsed, 100);
+          }
+        }
+
+        const messages = getGroupMessages(remoteJid, count);
+        if (messages.length < 3) {
+          await sendMessage(
+            remoteJid,
+            `⏳ *Not enough messages recorded yet!*\n\n` +
+            `I have buffered ${messages.length} message(s) in this group so far.\n` +
+            `As members chat, I maintain a rolling log of the last 100 messages. Type *!summarize* anytime once people have had a conversation!`,
+            originalMsg
+          );
+          break;
+        }
+
+        await sendMessage(remoteJid, `📋 *Analyzing the last ${messages.length} group messages...*`, originalMsg);
+
+        const formattedLog = messages
+          .map(m => `[${m.time}] ${m.sender}: ${m.text}`)
+          .join('\n');
+
+        const prompt =
+          `You are an AI assistant summarizing recent messages from a student WhatsApp group chat.\n\n` +
+          `Here is the chronological transcript of the last ${messages.length} messages:\n` +
+          `--- BEGIN CHAT LOG ---\n` +
+          `${formattedLog}\n` +
+          `--- END CHAT LOG ---\n\n` +
+          `Please provide a structured, easy-to-read summary with markdown bullet points:\n` +
+          `1. 📌 *Main Topics Discussed*\n` +
+          `2. 🎯 *Decisions or Conclusions* (if any)\n` +
+          `3. ❓ *Key Questions or Doubts Raised* (if any)\n` +
+          `4. 📝 *Action Items or Announcements* (if any)\n\n` +
+          `Tone: Clear, objective, and friendly. Match the language of the conversation (if the chat was in Hinglish, respond in natural Hinglish; if English, respond in English).`;
+
+        const summary = await askGemini(prompt, remoteJid, '');
+        await sendMessage(
+          remoteJid,
+          `📋 *Group Chat Summary (${messages.length} Messages)*\n\n${summary}`,
+          originalMsg
+        );
+        break;
+      }
+
       case 'ai':
       case 'ask':
       case 'gemini': {
@@ -832,6 +920,39 @@ Check bot connection and auto-sync status.`;
             originalMsg
           );
           return;
+        }
+
+        // Check if user is asking to analyze or summarize past group chats
+        const isGroupSummaryRequest = isGroup && /\b(past|recent|group|grp)\b.*\b(chat|chats|conversation|msgs?|messages)\b/i.test(question);
+        if (isGroupSummaryRequest) {
+          const messages = getGroupMessages(remoteJid, 100);
+          if (messages.length < 3) {
+            await sendMessage(
+              remoteJid,
+              `⏳ *Not enough messages recorded yet!*\n\n` +
+              `I only have ${messages.length} message(s) buffered in this group so far.\n` +
+              `As members chat in this group, I continuously log the last 100 messages. You can type *!summarize* or *!ai summarize* anytime!`,
+              originalMsg
+            );
+            return;
+          }
+
+          await sendMessage(remoteJid, `🤖 *Analyzing recent group conversation (${messages.length} messages)...*`, originalMsg);
+          const formattedLog = messages
+            .map(m => `[${m.time}] ${m.sender}: ${m.text}`)
+            .join('\n');
+
+          const prompt =
+            `The user asked: "${question}"\n\n` +
+            `Below is the chronological transcript of the last ${messages.length} messages from this group chat:\n` +
+            `--- BEGIN CHAT LOG ---\n` +
+            `${formattedLog}\n` +
+            `--- END CHAT LOG ---\n\n` +
+            `Please answer their question by analyzing the chat log above. Provide a structured, helpful summary with key points, decisions, and highlights. Match the language tone (English or Hinglish) of the users.`;
+
+          const reply = await askGemini(prompt, remoteJid, '');
+          await sendMessage(remoteJid, reply, originalMsg);
+          break;
         }
 
         await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
