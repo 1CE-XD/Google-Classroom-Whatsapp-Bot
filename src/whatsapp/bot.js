@@ -9,7 +9,7 @@ import pino from 'pino';
 import path from 'path';
 import { db } from '../storage/db.js';
 import { getUpcomingAssignments, getRecentCourseMaterials, downloadDriveFile } from '../google/classroom.js';
-import { askGemini } from '../ai/gemini.js';
+import { askGemini, clearChatHistory } from '../ai/gemini.js';
 
 let sock = null;
 let botJid = null;
@@ -82,7 +82,7 @@ export async function initWhatsAppBot() {
       const isGroup = remoteJid.endsWith('@g.us');
 
       // Check if command starts with a supported prefix
-      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|subscribe|unsubscribe|status)/i.test(text);
+      const hasCommandPrefix = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status)/i.test(text);
 
       // In groups, check if bot is mentioned
       const mentionedJids = messageContent.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -135,7 +135,10 @@ View recently uploaded materials, lecture files, and announcements.
 Download and send the actual PDF/document directly into this WhatsApp chat!
 
 🤖 *!ai <question>* or tag *@bot <question>*
-Ask Gemini AI any question about your courses, lab questions, or code!
+Ask Gemini AI with conversational memory (it remembers previous context!).
+
+🧹 *!clear* or *!reset*
+Clear AI conversation memory to start a fresh topic.
 
 🔔 *!subscribe*
 Enable deadline reminders in this group (alerted only at 24h & 2h before due time).
@@ -363,6 +366,13 @@ Check bot connection status.`;
         break;
       }
 
+      case 'reset':
+      case 'clear': {
+        clearChatHistory(remoteJid);
+        await sendMessage(remoteJid, '🧹 *AI conversation memory cleared!* You can now start a fresh topic.', originalMsg);
+        break;
+      }
+
       case 'ai':
       case 'ask':
       case 'gemini': {
@@ -377,7 +387,7 @@ Check bot connection status.`;
         }
 
         await sendMessage(remoteJid, '🤖 *Gemini is thinking...*', originalMsg);
-        const reply = await askGemini(question);
+        const reply = await askGemini(question, remoteJid);
         await sendMessage(remoteJid, reply, originalMsg);
         break;
       }
@@ -387,7 +397,7 @@ Check bot connection status.`;
         const question = rawText.replace(/@\d+/g, '').replace(/^[!/.#]/, '').trim();
         if (question.length > 3) {
           await sendMessage(remoteJid, '🤖 *Gemini is thinking...*', originalMsg);
-          const reply = await askGemini(question);
+          const reply = await askGemini(question, remoteJid);
           await sendMessage(remoteJid, reply, originalMsg);
         } else if (!isGroup) {
           await sendMessage(remoteJid, '❓ Type *!help* to see available commands.', originalMsg);
