@@ -125,10 +125,20 @@ export async function initWhatsAppBot() {
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isReplaced = statusCode === DisconnectReason.connectionReplaced;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const shouldReconnect = !isLoggedOut && !isReplaced;
+
       console.log(`🔌 WhatsApp Connection closed (status: ${statusCode}). Reconnecting: ${shouldReconnect}`);
-      if (shouldReconnect) {
-        initWhatsAppBot();
+
+      if (isReplaced) {
+        console.warn('⚠️ Connection replaced by another session/device. Reconnection halted to prevent loop.');
+      } else if (isLoggedOut) {
+        console.error('⚠️ Device logged out. Please remove auth_info_baileys and scan QR again.');
+      } else if (shouldReconnect) {
+        setTimeout(() => {
+          initWhatsAppBot().catch(err => console.error('Reconnection error:', err));
+        }, 3000);
       }
     } else if (connection === 'open') {
       botJid = sock.user.id.replace(/:.*@/, '@'); // Normalize bot JID
