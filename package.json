@@ -1,0 +1,21 @@
+{
+  "name": "whatsapp-classroom-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp Bot for Google Classroom due assignment reminders, recent file updates, and Gmail notifications.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "auth": "node src/google/auth-setup.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.30.0",
+    "@whiskeysockets/baileys": "^6.7.13",
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

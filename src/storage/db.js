@@ -1,0 +1,107 @@
+import fs from 'fs';
+import path from 'path';
+
+const DB_PATH = path.resolve('data', 'store.json');
+
+// Ensure data folder exists
+if (!fs.existsSync(path.dirname(DB_PATH))) {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+}
+
+const defaultData = {
+  subscribedGroups: [], // JIDs of groups where reminders should be posted
+  alertedAssignments: {}, // { assignmentId: [reminderStages: '24h', '2h', etc.] }
+  alertedEmails: [], // [messageId]
+  settings: {
+    checkIntervalMinutes: 15,
+    reminderHours: [24, 2]
+  }
+};
+
+function readDb() {
+  try {
+    if (!fs.existsSync(DB_PATH)) {
+      fs.writeFileSync(DB_PATH, JSON.stringify(defaultData, null, 2));
+      return defaultData;
+    }
+    const raw = fs.readFileSync(DB_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error('Error reading database file:', err);
+    return defaultData;
+  }
+}
+
+function writeDb(data) {
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('Error writing database file:', err);
+  }
+}
+
+export const db = {
+  get() {
+    return readDb();
+  },
+
+  addSubscriber(jid) {
+    const data = readDb();
+    if (!data.subscribedGroups.includes(jid)) {
+      data.subscribedGroups.push(jid);
+      writeDb(data);
+      return true;
+    }
+    return false;
+  },
+
+  removeSubscriber(jid) {
+    const data = readDb();
+    const index = data.subscribedGroups.indexOf(jid);
+    if (index !== -1) {
+      data.subscribedGroups.splice(index, 1);
+      writeDb(data);
+      return true;
+    }
+    return false;
+  },
+
+  isSubscribed(jid) {
+    const data = readDb();
+    return data.subscribedGroups.includes(jid);
+  },
+
+  hasAlertedAssignment(id, stage) {
+    const data = readDb();
+    const stages = data.alertedAssignments[id] || [];
+    return stages.includes(stage);
+  },
+
+  markAssignmentAlerted(id, stage) {
+    const data = readDb();
+    if (!data.alertedAssignments[id]) {
+      data.alertedAssignments[id] = [];
+    }
+    if (!data.alertedAssignments[id].includes(stage)) {
+      data.alertedAssignments[id].push(stage);
+      writeDb(data);
+    }
+  },
+
+  hasAlertedEmail(messageId) {
+    const data = readDb();
+    return data.alertedEmails.includes(messageId);
+  },
+
+  markEmailAlerted(messageId) {
+    const data = readDb();
+    if (!data.alertedEmails.includes(messageId)) {
+      data.alertedEmails.push(messageId);
+      // Keep only last 200 emails to keep db small
+      if (data.alertedEmails.length > 200) {
+        data.alertedEmails.shift();
+      }
+      writeDb(data);
+    }
+  }
+};
