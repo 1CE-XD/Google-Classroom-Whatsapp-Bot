@@ -11,6 +11,7 @@ import { db } from '../storage/db.js';
 import {
   getUpcomingAssignments,
   getRecentCourseMaterials,
+  getAllCourseDocuments,
   downloadDriveFile,
   formatDateTime,
   getCoursesList,
@@ -21,7 +22,18 @@ import { askGemini, clearChatHistory, getModelsListText, setPreferredModel, getP
 
 let sock = null;
 let botJid = null;
-let cachedFiles = []; // In-memory cache of recent files for !get <number>
+let cachedFiles = []; // Fallback in-memory cache of recent files
+const chatCachedFiles = new Map(); // Per-chat document cache: Map<remoteJid, Array<{ index, id, title, courseName }>>
+
+function setChatFiles(jid, files) {
+  chatCachedFiles.set(jid, files);
+  cachedFiles = files;
+}
+
+function getChatFiles(jid) {
+  return chatCachedFiles.get(jid) || cachedFiles || [];
+}
+
 const unactivatedGroupWarned = new Set(); // Tracks unactivated groups that received the one-time warning
 
 // Rolling in-memory message buffer for group chats (tracks recent messages for !summarize)
@@ -195,7 +207,7 @@ export async function initWhatsAppBot() {
       const isGroup = remoteJid.endsWith('@g.us');
 
       // Commands MUST start with an explicit prefix (!, /, ., or #) to prevent triggering on normal conversation!
-      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary)(\s+.*)?$/i;
+      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|docs?|documents?|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary)(\s+.*)?$/i;
       const hasCommandPrefix = commandPattern.test(text);
 
       // In subscribed groups, buffer non-command messages for !summarize (last 100 messages)
@@ -215,12 +227,9 @@ export async function initWhatsAppBot() {
       const isSenderOwner = isOwner(msg);
 
       // 1. Direct Messages (1-on-1 personal chats):
-      // NEVER reply to personal chats, friends, or anyone else in DMs!
-      // Only the bot owner testing with their own number using a command prefix is allowed.
+      // Completely disabled in DMs - bot only responds in group chats!
       if (!isGroup) {
-        if (!isSenderOwner || !hasCommandPrefix) {
-          continue; // 100% silent to all incoming messages from friends/contacts!
-        }
+        continue; // 100% silent in all DMs
       }
 
       // 2. Groups:
@@ -303,8 +312,11 @@ View upcoming assignments and deadlines (focused on active course, or all course
 📁 *!recent* or *!recent <number>*
 View recently posted materials, files, and announcements (focused on active course, or all courses).
 
-📥 *!get <number>* or *!download <number>*
-Download and send the actual PDF/document directly into this WhatsApp chat!
+📚 *!docs*
+List all documents and notes for the selected course (requires *!cls <number>* first).
+
+📥 *!get <number>* or *!get all*
+Download documents directly into WhatsApp! Type *!get 1* or *!get all* to download all listed docs.
 
 🔄 *!autosync <number>* or *!autosync all*
 (Owner only) Automatically upload any new posts, announcements, and files from a classroom to this group!
@@ -589,6 +601,8 @@ Check bot connection and auto-sync status.`;
           }
         });
 
+        setChatFiles(remoteJid, cachedFiles);
+
         let reply = targetCourse
           ? `📂 *Uploads for [${targetCourse.index}] ${targetCourse.name}*:\n\n`
           : `📂 *Classroom Uploads & Materials (Past 1 Month)*:\n\n`;
@@ -626,7 +640,7 @@ Check bot connection and auto-sync status.`;
 
         if (cachedFiles.length > 0) {
           reply += `💡 *To receive any file directly here in WhatsApp:*\n` +
-            `👉 Type *!get 1* or *!get 2* (using the [number] above)!\n\n`;
+            `👉 Type *!get 1* (using the [number] above) or *!get all* to download everything!\n\n`;
         }
 
         if (!targetCourse) {
@@ -634,6 +648,89 @@ Check bot connection and auto-sync status.`;
         }
 
         await sendMessage(remoteJid, reply.trim(), originalMsg);
+        break;
+      }
+
+      case 'docs':
+      case 'doc':
+      case 'documents': {
+        const selectedCourse = db.getSelectedCourse(remoteJid);
+        if (!selectedCourse) {
+          await sendMessage(
+            remoteJid,
+            '⚠️ *No Classroom Selected!*\n\n' +
+            'The *!docs* command lists all documents for a specific course.\n\n' +
+            '👉 *Step 1:* Type *!cls* to see all enrolled classrooms with numbers.\n' +
+            '👉 *Step 2:* Type *!cls <number>* (e.g. *!cls 1*) to select your course.\n' +
+            '👉 *Step 3:* Type *!docs* to list all documents for that course!\n\n' +
+            '_(Then use *!get <number>* or *!get all* to download them directly into WhatsApp)_',
+            originalMsg
+          );
+          break;
+        }
+
+        await sendMessage(
+          remoteJid,
+          `⏳ *Fetching all documents for [${selectedCourse.index}] ${selectedCourse.name}...* Please wait.`,
+          originalMsg
+        );
+
+        try {
+          const docs = await getAllCourseDocuments(selectedCourse.id);
+
+          if (!docs || docs.length === 0) {
+            await sendMessage(
+              remoteJid,
+              `📁 *Documents: [${selectedCourse.index}] ${selectedCourse.name}*\n\n` +
+              `ℹ️ No downloadable documents found in this classroom.`,
+              originalMsg
+            );
+            break;
+          }
+
+          const fileList = docs.map((d, i) => ({
+            index: i + 1,
+            id: d.id,
+            title: d.title,
+            courseName: selectedCourse.name,
+            category: d.category,
+            sourceTitle: d.sourceTitle,
+            date: d.date
+          }));
+
+          setChatFiles(remoteJid, fileList);
+
+          let reply = `📚 *Documents for [${selectedCourse.index}] ${selectedCourse.name}*\n` +
+            `Total documents found: *${fileList.length}*\n\n`;
+
+          fileList.forEach(f => {
+            const dateStr = f.date
+              ? f.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+              : '';
+            reply += `[${f.index}] 📄 *${f.title}*\n`;
+            if (f.sourceTitle) {
+              reply += `    📌 ${f.category}: ${f.sourceTitle}\n`;
+            }
+            if (dateStr) {
+              reply += `    📅 ${dateStr}\n`;
+            }
+            reply += `\n`;
+          });
+
+          reply += `──────────────────────────────\n` +
+            `📥 *How to download:*\n` +
+            `👉 Type *!get 1* to download document [1]\n` +
+            `👉 Type *!get all* to download ALL ${fileList.length} documents!`;
+
+          await sendMessage(remoteJid, reply.trim(), originalMsg);
+        } catch (err) {
+          console.error(`Error fetching docs for course ${selectedCourse.name}:`, err);
+          await sendMessage(
+            remoteJid,
+            `❌ *Failed to fetch documents:* ${sanitizeError(err.message)}`,
+            originalMsg
+          );
+        }
         break;
       }
 
@@ -727,73 +824,175 @@ Check bot connection and auto-sync status.`;
       case 'get':
       case 'download':
       case 'file': {
-        const query = commandArgs;
+        const query = (commandArgs || '').trim();
 
         if (!query) {
           await sendMessage(
             remoteJid,
-            '❓ Please specify which file number to download. Example:\n👉 *!get 1*\n*(Type !recent first to see available file numbers)*',
+            '❓ Please specify which document number to download, or type *!get all*.\n\n' +
+            '👉 *!get 1* — Download document [1]\n' +
+            '👉 *!get all* — Download ALL listed documents!\n\n' +
+            '*(Type !docs or !recent first to see available documents)*',
             originalMsg
           );
           return;
         }
 
-        let targetFile = null;
+        const files = getChatFiles(remoteJid);
 
-        // Check if user specified a file number (e.g. !get 1 or !get [1])
-        const matchNum = query.match(/\d+/);
-        if (matchNum) {
-          const fileNum = parseInt(matchNum[0], 10);
-          targetFile = cachedFiles.find(f => f.index === fileNum);
-          if (!targetFile && cachedFiles.length === 0) {
-            await sendMessage(remoteJid, '⏳ Please type *!recent* first to fetch the file list, then type *!get <number>*.', originalMsg);
+        // 1. Handle "!get all"
+        if (query.toLowerCase() === 'all') {
+          if (files.length === 0) {
+            await sendMessage(
+              remoteJid,
+              '⏳ No documents are currently loaded in this chat!\n\n' +
+              '👉 *Step 1:* Type *!cls 1* (or your course number) to select a classroom.\n' +
+              '👉 *Step 2:* Type *!docs* to list all documents.\n' +
+              '👉 *Step 3:* Type *!get all* to download all of them!',
+              originalMsg
+            );
             return;
           }
-        }
 
-        // Or if user provided a Google Drive link or file ID
-        if (!targetFile) {
-          const match = query.match(/\/d\/([a-zA-Z0-9_-]+)/) || query.match(/id=([a-zA-Z0-9_-]+)/);
-          const fileId = match ? match[1] : (query.length > 20 && !query.includes(' ') ? query : null);
-          if (fileId) {
-            targetFile = { id: fileId, title: 'Classroom Document', courseName: 'Classroom' };
+          await sendMessage(
+            remoteJid,
+            `⏳ *Downloading and sending all ${files.length} document(s)... Please wait.*\n` +
+            `_(Sending them one by one into this chat)_`,
+            originalMsg
+          );
+
+          let successCount = 0;
+          let failCount = 0;
+
+          for (const targetFile of files) {
+            try {
+              console.log(`📥 Downloading [${targetFile.index}/${files.length}] "${targetFile.title}"...`);
+              const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
+
+              await sock.sendMessage(
+                remoteJid,
+                {
+                  document: fileData.buffer,
+                  fileName: fileData.fileName,
+                  mimetype: fileData.mimeType,
+                  caption: `📄 *[${targetFile.index}] ${fileData.fileName}*\n📖 Course: ${targetFile.courseName || 'Classroom'}`
+                },
+                { quoted: originalMsg }
+              );
+
+              successCount++;
+              // Delay 1.2s between sends to prevent WhatsApp rate limits
+              await new Promise(r => setTimeout(r, 1200));
+            } catch (fileErr) {
+              console.error(`Failed to download/send [${targetFile.index}] "${targetFile.title}":`, fileErr.message);
+              failCount++;
+            }
           }
-        }
 
-        if (!targetFile) {
-          await sendMessage(remoteJid, `❌ Could not find file [${query}]. Type *!recent* to see available files and their numbers.`, originalMsg);
+          await sendMessage(
+            remoteJid,
+            `✅ *Download Complete!*\nSent *${successCount}* of *${files.length}* document(s) successfully.${failCount > 0 ? ` (${failCount} failed to download)` : ''}`,
+            originalMsg
+          );
           return;
         }
 
-        await sendMessage(remoteJid, `⏳ Downloading "*${targetFile.title}*" from Google Drive... Please wait.`, originalMsg);
-
-        try {
-          const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
-
-          console.log(`📤 Sending document "${fileData.fileName}" (${Math.round(fileData.size / 1024)} KB) to ${remoteJid}...`);
-
-          await sock.sendMessage(
-            remoteJid,
-            {
-              document: fileData.buffer,
-              fileName: fileData.fileName,
-              mimetype: fileData.mimeType,
-              caption: `📄 *${fileData.fileName}*\n📖 Course: ${targetFile.courseName || 'Classroom'}`
-            },
-            { quoted: originalMsg }
-          );
-        } catch (downloadErr) {
-          console.error('File download failed:', downloadErr);
-          if (downloadErr.message?.includes('insufficient') || downloadErr.message?.includes('Permission')) {
+        // 2. Handle single or multiple numbers (e.g. "!get 1" or "!get 1, 2")
+        const matchedNums = query.match(/\d+/g);
+        if (matchedNums && matchedNums.length > 0) {
+          if (files.length === 0) {
             await sendMessage(
               remoteJid,
-              `⚠️ *Drive Access Required:* To download files, the bot needs Google Drive access.\n👉 Please run *npm run auth* in your terminal once to authorize Drive download.`,
+              '⏳ Please type *!docs* or *!recent* first to fetch the documents list, then type *!get <number>*.',
               originalMsg
             );
-          } else {
+            return;
+          }
+
+          const targetIndices = matchedNums.map(n => parseInt(n, 10));
+          const targetFiles = targetIndices
+            .map(num => files.find(f => f.index === num))
+            .filter(Boolean);
+
+          if (targetFiles.length === 0) {
+            await sendMessage(
+              remoteJid,
+              `❌ Document number [${query}] not found.\n👉 Type *!docs* or *!recent* to see available numbers (1 to ${files.length}).`,
+              originalMsg
+            );
+            return;
+          }
+
+          for (const targetFile of targetFiles) {
+            await sendMessage(
+              remoteJid,
+              `⏳ Downloading "*${targetFile.title}*" from Google Drive... Please wait.`,
+              originalMsg
+            );
+
+            try {
+              const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
+              console.log(`📤 Sending document "${fileData.fileName}" (${Math.round(fileData.size / 1024)} KB) to ${remoteJid}...`);
+
+              await sock.sendMessage(
+                remoteJid,
+                {
+                  document: fileData.buffer,
+                  fileName: fileData.fileName,
+                  mimetype: fileData.mimeType,
+                  caption: `📄 *${fileData.fileName}*\n📖 Course: ${targetFile.courseName || 'Classroom'}`
+                },
+                { quoted: originalMsg }
+              );
+            } catch (downloadErr) {
+              console.error('File download failed:', downloadErr);
+              if (downloadErr.message?.includes('insufficient') || downloadErr.message?.includes('Permission')) {
+                await sendMessage(
+                  remoteJid,
+                  `⚠️ *Drive Access Required:* To download files, the bot needs Google Drive access.\n👉 Please run *npm run auth* in your terminal once to authorize Drive download.`,
+                  originalMsg
+                );
+              } else {
+                await sendMessage(remoteJid, `❌ Failed to download file: ${downloadErr.message}`, originalMsg);
+              }
+            }
+
+            if (targetFiles.length > 1) {
+              await new Promise(r => setTimeout(r, 1200));
+            }
+          }
+          return;
+        }
+
+        // 3. Or if user provided a Google Drive link or file ID
+        const match = query.match(/\/d\/([a-zA-Z0-9_-]+)/) || query.match(/id=([a-zA-Z0-9_-]+)/);
+        const fileId = match ? match[1] : (query.length > 20 && !query.includes(' ') ? query : null);
+        if (fileId) {
+          const targetFile = { id: fileId, title: 'Classroom Document', courseName: 'Classroom' };
+          await sendMessage(remoteJid, `⏳ Downloading document from Google Drive... Please wait.`, originalMsg);
+          try {
+            const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
+            await sock.sendMessage(
+              remoteJid,
+              {
+                document: fileData.buffer,
+                fileName: fileData.fileName,
+                mimetype: fileData.mimeType,
+                caption: `📄 *${fileData.fileName}*`
+              },
+              { quoted: originalMsg }
+            );
+          } catch (downloadErr) {
             await sendMessage(remoteJid, `❌ Failed to download file: ${downloadErr.message}`, originalMsg);
           }
+          return;
         }
+
+        await sendMessage(
+          remoteJid,
+          `❌ Could not find document [${query}]. Type *!docs* or *!recent* to see available numbers, or type *!get all*.`,
+          originalMsg
+        );
         break;
       }
 

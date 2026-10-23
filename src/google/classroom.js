@@ -276,6 +276,110 @@ export async function getRecentCourseMaterials(hoursBack = 720, targetCourseId =
 }
 
 /**
+ * Fetch all documents and Drive attachments posted in a specific course
+ * Searches across courseWorkMaterials, courseWork, and announcements
+ */
+export async function getAllCourseDocuments(courseId) {
+  const classroom = getClassroomClient();
+  const allDocs = [];
+  const seenDriveIds = new Set();
+
+  // 1. Course Work Materials
+  try {
+    const matRes = await classroom.courses.courseWorkMaterials.list({
+      courseId,
+      courseWorkMaterialStates: ['PUBLISHED'],
+      pageSize: 100
+    });
+    const materials = matRes.data.courseWorkMaterial || [];
+    for (const m of materials) {
+      const postDate = m.creationTime || m.updateTime;
+      const extracted = extractMaterials(m.materials);
+      for (const f of extracted) {
+        if (f.type === 'drive' && f.id && !seenDriveIds.has(f.id)) {
+          seenDriveIds.add(f.id);
+          allDocs.push({
+            id: f.id,
+            title: f.title,
+            url: f.url,
+            category: 'Material',
+            sourceTitle: m.title || 'Course Material',
+            date: postDate ? new Date(postDate) : null
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Error fetching courseWorkMaterials for course ${courseId}:`, err.message);
+  }
+
+  // 2. Course Work (Assignments)
+  try {
+    const workRes = await classroom.courses.courseWork.list({
+      courseId,
+      courseWorkStates: ['PUBLISHED'],
+      pageSize: 100
+    });
+    const coursework = workRes.data.courseWork || [];
+    for (const w of coursework) {
+      const postDate = w.creationTime || w.updateTime;
+      const extracted = extractMaterials(w.materials);
+      for (const f of extracted) {
+        if (f.type === 'drive' && f.id && !seenDriveIds.has(f.id)) {
+          seenDriveIds.add(f.id);
+          allDocs.push({
+            id: f.id,
+            title: f.title,
+            url: f.url,
+            category: 'Assignment',
+            sourceTitle: w.title || 'Assignment',
+            date: postDate ? new Date(postDate) : null
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Error fetching courseWork for course ${courseId}:`, err.message);
+  }
+
+  // 3. Announcements
+  try {
+    const annRes = await classroom.courses.announcements.list({
+      courseId,
+      announcementStates: ['PUBLISHED'],
+      pageSize: 100
+    });
+    const announcements = annRes.data.announcements || [];
+    for (const a of announcements) {
+      const postDate = a.creationTime || a.updateTime;
+      const extracted = extractMaterials(a.materials);
+      for (const f of extracted) {
+        if (f.type === 'drive' && f.id && !seenDriveIds.has(f.id)) {
+          seenDriveIds.add(f.id);
+          allDocs.push({
+            id: f.id,
+            title: f.title,
+            url: f.url,
+            category: 'Announcement',
+            sourceTitle: a.text ? (a.text.slice(0, 40) + '...') : 'Announcement',
+            date: postDate ? new Date(postDate) : null
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Error fetching announcements for course ${courseId}:`, err.message);
+  }
+
+  // Sort by date (newest first)
+  return allDocs.sort((a, b) => {
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return b.date - a.date;
+  });
+}
+
+/**
  * Download a file from Google Drive by fileId
  * Converts native Google Docs/Slides into PDFs so they can be viewed directly on WhatsApp
  */
