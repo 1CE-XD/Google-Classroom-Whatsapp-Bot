@@ -2,7 +2,9 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  downloadContentFromMessage,
+  extractMessageContent
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
@@ -54,6 +56,84 @@ function bufferGroupMessage(groupJid, msgObj) {
 export function getGroupMessages(groupJid, limit = 100) {
   const buffer = groupChatBuffers.get(groupJid) || [];
   return buffer.slice(-limit);
+}
+
+/**
+ * Extract media attachment (image, PDF, document) from a WhatsApp message or its quoted reply
+ * @param {object} msg - Baileys message object
+ * @returns {Promise<{ buffer: Buffer, mimeType: string, fileName: string } | null>}
+ */
+export async function extractMediaAttachment(msg) {
+  if (!msg || !msg.message) return null;
+
+  try {
+    const rawContent = msg.message;
+    const content = extractMessageContent(rawContent) || rawContent;
+
+    // 1. Direct image message
+    if (content.imageMessage) {
+      const img = content.imageMessage;
+      const stream = await downloadContentFromMessage(img, 'image');
+      const chunks = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      return {
+        buffer: Buffer.concat(chunks),
+        mimeType: img.mimetype || 'image/jpeg',
+        fileName: 'image.jpg'
+      };
+    }
+
+    // 2. Direct document message
+    if (content.documentMessage) {
+      const doc = content.documentMessage;
+      const stream = await downloadContentFromMessage(doc, 'document');
+      const chunks = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      return {
+        buffer: Buffer.concat(chunks),
+        mimeType: doc.mimetype || 'application/pdf',
+        fileName: doc.fileName || doc.title || 'document.pdf'
+      };
+    }
+
+    // 3. Quoted media (user replied to an image or document)
+    const contextInfo =
+      content.extendedTextMessage?.contextInfo ||
+      content.imageMessage?.contextInfo ||
+      content.documentMessage?.contextInfo;
+
+    if (contextInfo?.quotedMessage) {
+      const quoted = extractMessageContent(contextInfo.quotedMessage) || contextInfo.quotedMessage;
+
+      if (quoted.imageMessage) {
+        const img = quoted.imageMessage;
+        const stream = await downloadContentFromMessage(img, 'image');
+        const chunks = [];
+        for await (const chunk of stream) chunks.push(chunk);
+        return {
+          buffer: Buffer.concat(chunks),
+          mimeType: img.mimetype || 'image/jpeg',
+          fileName: 'quoted_image.jpg'
+        };
+      }
+
+      if (quoted.documentMessage) {
+        const doc = quoted.documentMessage;
+        const stream = await downloadContentFromMessage(doc, 'document');
+        const chunks = [];
+        for await (const chunk of stream) chunks.push(chunk);
+        return {
+          buffer: Buffer.concat(chunks),
+          mimeType: doc.mimetype || 'application/pdf',
+          fileName: doc.fileName || doc.title || 'quoted_document.pdf'
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ Media attachment download error:', err.message);
+  }
+
+  return null;
 }
 
 // Anti-Spam / Rate Limiting per user (5 commands per 15s window)
@@ -193,11 +273,13 @@ export async function initWhatsAppBot() {
         msg.message.viewOnceMessageV2?.message ||
         msg.message;
 
-      // Extract text content
+      // Extract text content (including captions on photos, documents, and videos)
       const text = (
         messageContent.conversation ||
         messageContent.extendedTextMessage?.text ||
         messageContent.imageMessage?.caption ||
+        messageContent.documentMessage?.caption ||
+        messageContent.videoMessage?.caption ||
         ''
       ).trim();
 
@@ -328,6 +410,7 @@ Download documents directly into WhatsApp! Type *!get 1* or *!get all* to downlo
 
 🤖 *!ai <question>* or tag *@bot <question>*
 Ask AI with conversational memory.
+📸 *Images & Documents Reader:* Send an image or PDF with caption *!ai solve this* or reply to any photo/document with *!ai explain*!
 
 📋 *!summarize* or *!summarize <number>*
 Summarize recent group chats and discussions (e.g. *!summarize 50* or *!summarize 100*)!
@@ -1117,17 +1200,24 @@ Check bot connection and auto-sync status.`;
       case 'ask':
       case 'gemini': {
         const question = rawText.replace(/^[!/.#]?(ai|ask|gemini)\s*/i, '').trim();
-        if (!question) {
+
+        // 1. Check for attached or quoted media (image, PDF, document)
+        const media = await extractMediaAttachment(originalMsg);
+
+        if (!question && !media) {
           await sendMessage(
             remoteJid,
-            '❓ Please provide a question! Example:\n👉 *!ai How do I implement AVL tree deletion in C++?*',
+            '❓ *How to use AI:*\n\n' +
+            '👉 *!ai <question>* — Ask anything (coding, math, syllabus, roasts)\n' +
+            '👉 *Attach photo/doc with caption !ai* — Read & solve questions or notes\n' +
+            '👉 *Reply to any photo or PDF with !ai* — Analyze and summarize it instantly!',
             originalMsg
           );
           return;
         }
 
         // Check if user is asking to analyze or summarize past group chats
-        const isGroupSummaryRequest = isGroup && /\b(past|recent|group|grp)\b.*\b(chat|chats|conversation|msgs?|messages)\b/i.test(question);
+        const isGroupSummaryRequest = !media && isGroup && /\b(past|recent|group|grp)\b.*\b(chat|chats|conversation|msgs?|messages)\b/i.test(question);
         if (isGroupSummaryRequest) {
           const messages = getGroupMessages(remoteJid, 100);
           if (messages.length < 3) {
@@ -1159,9 +1249,19 @@ Check bot connection and auto-sync status.`;
           break;
         }
 
-        await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
+        if (media) {
+          const isDoc = media.mimeType === 'application/pdf' || media.fileName.endsWith('.pdf');
+          await sendMessage(
+            remoteJid,
+            isDoc ? '📄 *Analyzing document / PDF...* Please wait.' : '📸 *Analyzing image...* Please wait.',
+            originalMsg
+          );
+        } else {
+          await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
+        }
+
         const classroomContext = await getClassroomContextSummary();
-        const reply = await askGemini(question, remoteJid, classroomContext);
+        const reply = await askGemini(question, remoteJid, classroomContext, media);
         await sendMessage(remoteJid, reply, originalMsg);
         break;
       }
@@ -1194,13 +1294,23 @@ Check bot connection and auto-sync status.`;
       }
 
       default: {
-        // If explicitly @mentioned in a group with a natural question, ask Gemini!
+        // If explicitly @mentioned in a group with a natural question or image, ask Gemini!
         if (isMentioned) {
           const question = rawText.replace(/@\d+/g, '').replace(/^[!/.#]/, '').trim();
-          if (question.length > 3) {
-            await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
+          const media = await extractMediaAttachment(originalMsg);
+          if (question.length > 3 || media) {
+            if (media) {
+              const isDoc = media.mimeType === 'application/pdf' || media.fileName.endsWith('.pdf');
+              await sendMessage(
+                remoteJid,
+                isDoc ? '📄 *Analyzing document / PDF...* Please wait.' : '📸 *Analyzing image...* Please wait.',
+                originalMsg
+              );
+            } else {
+              await sendMessage(remoteJid, '🤖 *Thinking...*', originalMsg);
+            }
             const classroomContext = await getClassroomContextSummary();
-            const reply = await askGemini(question, remoteJid, classroomContext);
+            const reply = await askGemini(question, remoteJid, classroomContext, media);
             await sendMessage(remoteJid, reply, originalMsg);
           }
         }
