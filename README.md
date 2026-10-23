@@ -99,7 +99,7 @@ npm start
 | `!help` or `@bot help` | Display available commands and instructions. |
 | `!due` or `@bot due` | List all upcoming assignments sorted by deadline with direct links and attachments. |
 | `!recent` or `@bot recent` | List course materials, lecture files, and announcements with file numbers `[1]`, `[2]`. |
-| `!get <number>` or `!download <num>` | **Download and send the actual PDF/doc file directly into the WhatsApp chat!** |
+| `!get <number>` / `!get all` (alias `!download <num>`) | **Download and send the actual PDF/doc file directly into the WhatsApp chat!** Add a trailing flag to deliver by DM instead: `!get all true` or `!get 3 true` — in groups, files arrive privately in the DM of whoever typed the command (`false` = this chat). |
 | `!ai <question>` or `@bot <question>` | **Ask Google Gemini AI** questions about your courses, lab questions, or code! |
 | `!subscribe` | Enable automated 24h & 2h deadline reminders in this group. |
 | `!unsubscribe` | Disable automated reminders in this group. |

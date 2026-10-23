@@ -66,6 +66,7 @@ whatsapp-classroom-bot/
 * **`!docs`**: Lists all downloadable documents/PDFs for the selected course (requires `!cls <n>`).
 * **`!get <number>`**: Downloads the selected document from Google Drive and sends the PDF directly into WhatsApp.
 * **`!get all`**: Sequentially downloads and delivers all documents found in `!docs`.
+* **`!get <number|all> [true/false]`**: Optional trailing DM flag. `true` = the file(s) are downloaded and delivered privately into the requester's DM instead of the group chat (also `yes`/`on`/`enable` accepted; `false`/`no`/`off` = this chat, which is the default). In groups the DM target is `originalMsg.key.participant`; in DM chats the flag is a no-op. DM delivery seeds the DM's `chatCachedFiles` via `setChatFiles(deliveryJid, files)` so `!get <number>` works inside the DM afterwards, re-uses the shared `sendAllDocuments()` helper with a 1.2s anti-rate-limit gap and conditional quoting (quote only when the target chat is the origin chat), and reports all errors (incl. the Drive-permission hint) back in the origin chat.
 * **`!autosync <number>` / `!autosync all` / `!autosync off`**: (Owner only) Dedicated background watcher that automatically posts new announcements and uploads files into WhatsApp groups.
 
 ### C. AI Study Buddy & Multimodal Vision/Doc Reader (`!ai`)
@@ -112,7 +113,7 @@ whatsapp-classroom-bot/
 | `!due` | `!due` or `!due 1` | Upcoming assignments and submission deadlines |
 | `!recent` | `!recent` or `!recent 1` | Recent classroom posts, announcements & files |
 | `!docs` | `!docs` | List all downloadable documents for selected course |
-| `!get` | `!get 1` or `!get all` | Download document(s) directly into WhatsApp |
+| `!get` | `!get 1` / `!get all` / `!get all true` | Download document(s) directly into WhatsApp; add `true` as last arg to receive the files in your DM instead |
 | `!autosync` | `!autosync 1` / `all` / `off` | (Owner) Auto-upload new posts & files to group |
 | `!ai` | `!ai <question>` | Ask AI with conversational memory |
 | `!ai` + Image/PDF | Photo with caption `!ai` | Full-page OCR, diagram & assignment solver |

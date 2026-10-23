@@ -37,6 +37,52 @@ function getChatFiles(jid) {
   return chatCachedFiles.get(jid) || cachedFiles || [];
 }
 
+/**
+ * Download a list of documents (from the !docs / !recent list) and send them
+ * into a chat as actual files, one by one with a small delay to avoid
+ * WhatsApp rate limits. Shared by "!get all" and the "Docs to DM" auto-delivery.
+ *
+ * @param {string} targetJid - Chat to deliver the files into (a DM Jid for !docs auto-send)
+ * @param {Array<{ index: number, id: string, title: string, courseName?: string }>} files
+ * @param {object|null} originalMsg - Message to quote; quoting is skipped when
+ *   the message came from a different chat than the delivery target (e.g. group -> DM)
+ * @returns {Promise<{ success: number, failed: number, total: number }>}
+ */
+async function sendAllDocuments(targetJid, files, originalMsg = null) {
+  let successCount = 0;
+  let failCount = 0;
+
+  // Quoting is only valid when the quoted message lives in the same chat we deliver to
+  const canQuote = Boolean(originalMsg && originalMsg.key?.remoteJid === targetJid);
+
+  for (const targetFile of files) {
+    try {
+      console.log(`📥 Downloading [${targetFile.index}/${files.length}] "${targetFile.title}"...`);
+      const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
+
+      await sock.sendMessage(
+        targetJid,
+        {
+          document: fileData.buffer,
+          fileName: fileData.fileName,
+          mimetype: fileData.mimeType,
+          caption: `📄 *[${targetFile.index}] ${fileData.fileName}*\n📖 Course: ${targetFile.courseName || 'Classroom'}`
+        },
+        canQuote ? { quoted: originalMsg } : {}
+      );
+
+      successCount++;
+      // Delay 1.2s between sends to prevent WhatsApp rate limits
+      await new Promise(r => setTimeout(r, 1200));
+    } catch (fileErr) {
+      console.error(`Failed to download/send [${targetFile.index}] "${targetFile.title}":`, fileErr.message);
+      failCount++;
+    }
+  }
+
+  return { success: successCount, failed: failCount, total: files.length };
+}
+
 const unactivatedGroupWarned = new Set(); // Tracks unactivated groups that received the one-time warning
 
 // Persistent message buffer for group chats (tracks recent messages for !summarize)
@@ -495,8 +541,8 @@ View recently posted materials, files, and announcements (focused on active cour
 📚 *!docs*
 List all documents and notes for the selected course (requires *!cls <number>* first).
 
-📥 *!get <number>* or *!get all*
-Download documents directly into WhatsApp! Type *!get 1* or *!get all* to download all listed docs.
+📥 *!get <number>* / *!get all* / *!get all true*
+Download documents directly into WhatsApp! Type *!get 1* or *!get all*, or add *true* to receive them privately in your DM instead (e.g. *!get all true*, *!get 3 true*).
 
 🔄 *!autosync <number>* or *!autosync all*
 (Owner only) Automatically upload any new posts, announcements, and files from a classroom to this group!
@@ -901,9 +947,11 @@ Check bot connection and auto-sync status.`;
           reply += `──────────────────────────────\n` +
             `📥 *How to download:*\n` +
             `👉 Type *!get 1* to download document [1]\n` +
-            `👉 Type *!get all* to download ALL ${fileList.length} documents!`;
+            `👉 Type *!get all* to download ALL ${fileList.length} documents!\n` +
+            `👉 Add *true* to receive files in your DM instead (e.g. *!get all true*)!`;
 
           await sendMessage(remoteJid, reply.trim(), originalMsg);
+          break;
         } catch (err) {
           console.error(`Error fetching docs for course ${selectedCourse.name}:`, err);
           await sendMessage(
@@ -1005,14 +1053,31 @@ Check bot connection and auto-sync status.`;
       case 'get':
       case 'download':
       case 'file': {
-        const query = (commandArgs || '').trim();
+        // Supports an optional trailing DM flag: "!get all true", "!get 3 false"
+        // true = deliver the file(s) to the requester's DM, false = this chat (default)
+        const dmFlagWords = {
+          true: true, yes: true, y: true, on: true, enable: true, enabled: true,
+          false: false, no: false, n: false, off: false, disable: false, disabled: false
+        };
+        const tokens = (commandArgs || '').trim().split(/\s+/).filter(Boolean);
+        let sendToDm = null; // null = flag not given -> deliver into the current chat
+        let query = tokens.join(' ');
+
+        if (tokens.length > 1) {
+          const lastToken = tokens[tokens.length - 1].toLowerCase();
+          if (lastToken in dmFlagWords) {
+            sendToDm = dmFlagWords[lastToken];
+            query = tokens.slice(0, -1).join(' ');
+          }
+        }
 
         if (!query) {
           await sendMessage(
             remoteJid,
             '❓ Please specify which document number to download, or type *!get all*.\n\n' +
             '👉 *!get 1* — Download document [1]\n' +
-            '👉 *!get all* — Download ALL listed documents!\n\n' +
+            '👉 *!get all* — Download ALL listed documents!\n' +
+            '👉 *!get all true* — Send them to your DM instead! 📬\n\n' +
             '*(Type !docs or !recent first to see available documents)*',
             originalMsg
           );
@@ -1020,6 +1085,23 @@ Check bot connection and auto-sync status.`;
         }
 
         const files = getChatFiles(remoteJid);
+
+        // Resolve the DM delivery target for "!get ... true"
+        let deliveryJid = remoteJid;
+        if (sendToDm === true && isGroup) {
+          const requesterJid = originalMsg.key?.participant || null;
+          if (!requesterJid) {
+            await sendMessage(
+              remoteJid,
+              `⚠️ Couldn't identify your DM address. Use *!get ${query}* without the DM flag instead.`,
+              originalMsg
+            );
+            return;
+          }
+          deliveryJid = requesterJid;
+        }
+        // In a DM chat the flag is a no-op: everything already arrives privately here
+        const isDmDelivery = deliveryJid !== remoteJid;
 
         // 1. Handle "!get all"
         if (query.toLowerCase() === 'all') {
@@ -1035,45 +1117,37 @@ Check bot connection and auto-sync status.`;
             return;
           }
 
-          await sendMessage(
-            remoteJid,
-            `⏳ *Downloading and sending all ${files.length} document(s)... Please wait.*\n` +
-            `_(Sending them one by one into this chat)_`,
-            originalMsg
-          );
-
-          let successCount = 0;
-          let failCount = 0;
-
-          for (const targetFile of files) {
-            try {
-              console.log(`📥 Downloading [${targetFile.index}/${files.length}] "${targetFile.title}"...`);
-              const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
-
-              await sock.sendMessage(
-                remoteJid,
-                {
-                  document: fileData.buffer,
-                  fileName: fileData.fileName,
-                  mimetype: fileData.mimeType,
-                  caption: `📄 *[${targetFile.index}] ${fileData.fileName}*\n📖 Course: ${targetFile.courseName || 'Classroom'}`
-                },
-                { quoted: originalMsg }
-              );
-
-              successCount++;
-              // Delay 1.2s between sends to prevent WhatsApp rate limits
-              await new Promise(r => setTimeout(r, 1200));
-            } catch (fileErr) {
-              console.error(`Failed to download/send [${targetFile.index}] "${targetFile.title}":`, fileErr.message);
-              failCount++;
-            }
+          if (isDmDelivery) {
+            // Cache the list under the requester's DM Jid so "!get <number>" works there later
+            setChatFiles(deliveryJid, files);
+            await sendMessage(
+              remoteJid,
+              `📬 *Switching to DM!* Sending all ${files.length} document(s) to your private chat — they won't flood this group.`,
+              originalMsg
+            );
+            await sendMessage(
+              deliveryJid,
+              `📬 *Documents Delivery*\n` +
+              `⏳ Downloading and sending all ${files.length} document(s) here, one by one...\n` +
+              `_(Large classrooms may take a little while.)_\n\n` +
+              `_Tip: once delivered, use *!get <number>* in this chat to re-download any document._`,
+              null
+            );
+          } else {
+            await sendMessage(
+              remoteJid,
+              `⏳ *Downloading and sending all ${files.length} document(s)... Please wait.*\n` +
+              `_(Sending them one by one into this chat)_`,
+              originalMsg
+            );
           }
 
+          const result = await sendAllDocuments(deliveryJid, files, originalMsg);
+
           await sendMessage(
-            remoteJid,
-            `✅ *Download Complete!*\nSent *${successCount}* of *${files.length}* document(s) successfully.${failCount > 0 ? ` (${failCount} failed to download)` : ''}`,
-            originalMsg
+            deliveryJid,
+            `✅ *Download Complete!*\nSent *${result.success}* of *${result.total}* document(s) successfully.${result.failed > 0 ? ` (${result.failed} failed to download)` : ''}`,
+            isDmDelivery ? null : originalMsg
           );
           return;
         }
@@ -1104,26 +1178,38 @@ Check bot connection and auto-sync status.`;
             return;
           }
 
-          for (const targetFile of targetFiles) {
+          if (isDmDelivery) {
+            // Cache the list under the requester's DM Jid so "!get <number>" works there later
+            setChatFiles(deliveryJid, files);
             await sendMessage(
               remoteJid,
-              `⏳ Downloading "*${targetFile.title}*" from Google Drive... Please wait.`,
+              `📬 *Switching to DM!* Downloading ${targetFiles.length} document(s) and delivering them to your private chat...`,
               originalMsg
             );
+          }
+
+          for (const targetFile of targetFiles) {
+            if (!isDmDelivery) {
+              await sendMessage(
+                remoteJid,
+                `⏳ Downloading "*${targetFile.title}*" from Google Drive... Please wait.`,
+                originalMsg
+              );
+            }
 
             try {
               const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
-              console.log(`📤 Sending document "${fileData.fileName}" (${Math.round(fileData.size / 1024)} KB) to ${remoteJid}...`);
+              console.log(`📤 Sending document "${fileData.fileName}" (${Math.round(fileData.size / 1024)} KB) to ${deliveryJid}...`);
 
               await sock.sendMessage(
-                remoteJid,
+                deliveryJid,
                 {
                   document: fileData.buffer,
                   fileName: fileData.fileName,
                   mimetype: fileData.mimeType,
                   caption: `📄 *${fileData.fileName}*\n📖 Course: ${targetFile.courseName || 'Classroom'}`
                 },
-                { quoted: originalMsg }
+                isDmDelivery ? {} : { quoted: originalMsg }
               );
             } catch (downloadErr) {
               console.error('File download failed:', downloadErr);
@@ -1150,18 +1236,22 @@ Check bot connection and auto-sync status.`;
         const fileId = match ? match[1] : (query.length > 20 && !query.includes(' ') ? query : null);
         if (fileId) {
           const targetFile = { id: fileId, title: 'Classroom Document', courseName: 'Classroom' };
-          await sendMessage(remoteJid, `⏳ Downloading document from Google Drive... Please wait.`, originalMsg);
+          await sendMessage(
+            remoteJid,
+            `⏳ Downloading document from Google Drive... Please wait.${isDmDelivery ? ' (Delivering to your DM 📬)' : ''}`,
+            originalMsg
+          );
           try {
             const fileData = await downloadDriveFile(targetFile.id, targetFile.title);
             await sock.sendMessage(
-              remoteJid,
+              deliveryJid,
               {
                 document: fileData.buffer,
                 fileName: fileData.fileName,
                 mimetype: fileData.mimeType,
                 caption: `📄 *${fileData.fileName}*`
               },
-              { quoted: originalMsg }
+              isDmDelivery ? {} : { quoted: originalMsg }
             );
           } catch (downloadErr) {
             await sendMessage(remoteJid, `❌ Failed to download file: ${downloadErr.message}`, originalMsg);
@@ -1222,7 +1312,7 @@ Check bot connection and auto-sync status.`;
           reply += `• Group Permissions: ${subscribed ? '🟢 Activated' : '🔴 Deactivated (owner must type !subscribe)'}\n`;
           reply += `• Live Auto-Sync: ${autoSync && autoSync.enabled ? `🟢 Active (${autoSync.courseName})` : '🔴 Inactive (type !autosync)'}\n`;
         }
-        reply += `• Active Classroom: ${selected ? `🎯 [${selected.index}] ${selected.name}` : '🌐 All Classrooms (type !cls <num> to focus)'}\n`;
+        reply += `• Active Classroom: ${selected ? `🎯 [${selected.index}] ${selected.name}` : '🌐 All Classrooms (type !cls <num> to focus)'}`;
         await sendMessage(remoteJid, reply.trim(), originalMsg);
         break;
       }
