@@ -9,6 +9,7 @@ import {
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import path from 'path';
+import fs from 'fs';
 import { db } from '../storage/db.js';
 import {
   getUpcomingAssignments,
@@ -38,9 +39,49 @@ function getChatFiles(jid) {
 
 const unactivatedGroupWarned = new Set(); // Tracks unactivated groups that received the one-time warning
 
-// Rolling in-memory message buffer for group chats (tracks recent messages for !summarize)
+// Persistent message buffer for group chats (tracks recent messages for !summarize)
 const groupChatBuffers = new Map(); // Map<groupJid, Array<{ sender: string, text: string, time: string }>>
 const MAX_GROUP_BUFFER = 100;
+const BUFFER_FILE = path.resolve('data', 'chat_buffers.json');
+
+function loadGroupBuffers() {
+  try {
+    if (fs.existsSync(BUFFER_FILE)) {
+      const raw = fs.readFileSync(BUFFER_FILE, 'utf-8');
+      const data = JSON.parse(raw);
+      for (const [jid, msgs] of Object.entries(data)) {
+        if (Array.isArray(msgs)) {
+          groupChatBuffers.set(jid, msgs.slice(-MAX_GROUP_BUFFER));
+        }
+      }
+      console.log(`💾 Loaded persistent chat memory for ${groupChatBuffers.size} group(s).`);
+    }
+  } catch (err) {
+    console.warn('⚠️ Could not load group buffers from disk:', err.message);
+  }
+}
+
+// Load existing chat history on startup
+loadGroupBuffers();
+
+let saveBufferTimer = null;
+function saveGroupBuffersDebounced() {
+  if (saveBufferTimer) clearTimeout(saveBufferTimer);
+  saveBufferTimer = setTimeout(() => {
+    try {
+      const obj = {};
+      for (const [jid, msgs] of groupChatBuffers.entries()) {
+        obj[jid] = msgs;
+      }
+      if (!fs.existsSync(path.dirname(BUFFER_FILE))) {
+        fs.mkdirSync(path.dirname(BUFFER_FILE), { recursive: true });
+      }
+      fs.writeFileSync(BUFFER_FILE, JSON.stringify(obj, null, 2));
+    } catch (err) {
+      console.warn('⚠️ Could not save group buffers to disk:', err.message);
+    }
+  }, 1000);
+}
 
 function bufferGroupMessage(groupJid, msgObj) {
   if (!groupChatBuffers.has(groupJid)) {
@@ -51,6 +92,7 @@ function bufferGroupMessage(groupJid, msgObj) {
   if (buffer.length > MAX_GROUP_BUFFER) {
     buffer.shift();
   }
+  saveGroupBuffersDebounced();
 }
 
 export function getGroupMessages(groupJid, limit = 100) {

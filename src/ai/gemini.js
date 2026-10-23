@@ -1,6 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import sharp from 'sharp';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
@@ -13,6 +15,64 @@ const chatLastLanguage = new Map();
 // Map of chatId -> model key ('auto' | 'lite' | 'flash' | 'preview' | '3.6' | '3.7' | '3.8' | 'r1' | 'llama3')
 const chatModelPreferences = new Map();
 const MAX_HISTORY_TURNS = 10; // Last 10 messages (5 turns)
+const AI_HISTORY_FILE = path.resolve('data', 'ai_histories.json');
+
+function loadAiState() {
+  try {
+    if (fs.existsSync(AI_HISTORY_FILE)) {
+      const raw = fs.readFileSync(AI_HISTORY_FILE, 'utf-8');
+      const data = JSON.parse(raw);
+      if (data.histories) {
+        for (const [id, hist] of Object.entries(data.histories)) {
+          if (Array.isArray(hist)) chatHistories.set(id, hist.slice(-MAX_HISTORY_TURNS));
+        }
+      }
+      if (data.models) {
+        for (const [id, m] of Object.entries(data.models)) {
+          chatModelPreferences.set(id, m);
+        }
+      }
+      if (data.languages) {
+        for (const [id, l] of Object.entries(data.languages)) {
+          chatLastLanguage.set(id, l);
+        }
+      }
+      console.log(`💾 Loaded persistent AI memory & preferences for ${chatHistories.size} chat(s).`);
+    }
+  } catch (err) {
+    console.warn('⚠️ Could not load AI history from disk:', err.message);
+  }
+}
+
+// Load AI state on startup
+loadAiState();
+
+let saveAiTimer = null;
+function saveAiStateDebounced() {
+  if (saveAiTimer) clearTimeout(saveAiTimer);
+  saveAiTimer = setTimeout(() => {
+    try {
+      const histories = {};
+      for (const [id, hist] of chatHistories.entries()) {
+        histories[id] = hist;
+      }
+      const models = {};
+      for (const [id, m] of chatModelPreferences.entries()) {
+        models[id] = m;
+      }
+      const languages = {};
+      for (const [id, l] of chatLastLanguage.entries()) {
+        languages[id] = l;
+      }
+      if (!fs.existsSync(path.dirname(AI_HISTORY_FILE))) {
+        fs.mkdirSync(path.dirname(AI_HISTORY_FILE), { recursive: true });
+      }
+      fs.writeFileSync(AI_HISTORY_FILE, JSON.stringify({ histories, models, languages }, null, 2));
+    } catch (err) {
+      console.warn('⚠️ Could not save AI history to disk:', err.message);
+    }
+  }, 1000);
+}
 
 export const AVAILABLE_MODELS = {
   'auto': {
@@ -122,6 +182,7 @@ export function setPreferredModel(chatId, modelKey) {
 
   if (AVAILABLE_MODELS[targetKey]) {
     chatModelPreferences.set(chatId, targetKey);
+    saveAiStateDebounced();
     return AVAILABLE_MODELS[targetKey];
   }
   return null;
@@ -614,6 +675,7 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
       history.push({ role: 'model', parts: [{ text: replyText }] });
       if (history.length > MAX_HISTORY_TURNS) history = history.slice(-MAX_HISTORY_TURNS);
       chatHistories.set(chatId, history);
+      saveAiStateDebounced();
       return replyText;
     } catch (err) {
       console.warn(`⚠️ Groq model ${pref.id} failed (${err.message}). Falling back to Gemini pool...`);
@@ -685,6 +747,7 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
         history = history.slice(-MAX_HISTORY_TURNS);
       }
       chatHistories.set(chatId, history);
+      saveAiStateDebounced();
 
       return replyText;
     } catch (err) {
@@ -707,4 +770,5 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
 export function clearChatHistory(chatId) {
   chatHistories.delete(chatId);
   chatLastLanguage.delete(chatId);
+  saveAiStateDebounced();
 }
