@@ -309,6 +309,46 @@ export async function initWhatsAppBot() {
     }
   });
 
+  // Handle historical messages synced from WhatsApp Web on startup
+  sock.ev.on('messaging-history.set', ({ messages }) => {
+    if (!messages || messages.length === 0) return;
+    let count = 0;
+    for (const msg of messages) {
+      const jid = msg.key?.remoteJid;
+      if (!jid || !jid.endsWith('@g.us')) continue;
+
+      const rawContent = msg.message;
+      if (!rawContent) continue;
+      const messageContent = extractMessageContent(rawContent) || rawContent;
+      const text = (
+        messageContent.conversation ||
+        messageContent.extendedTextMessage?.text ||
+        messageContent.imageMessage?.caption ||
+        messageContent.documentMessage?.caption ||
+        ''
+      ).trim();
+
+      if (!text || /^[!/.#]/.test(text)) continue;
+
+      const senderName = msg.key?.fromMe
+        ? 'You (Owner)'
+        : (msg.pushName || (msg.key?.participant ? msg.key.participant.replace(/[^0-9]/g, '').slice(-4) : 'Member'));
+
+      const timestamp = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now();
+      const timeStr = new Date(timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+      bufferGroupMessage(jid, {
+        sender: senderName,
+        text,
+        time: timeStr
+      });
+      count++;
+    }
+    if (count > 0) {
+      console.log(`📥 Synced ${count} past message(s) from WhatsApp server.`);
+    }
+  });
+
   // Handle incoming messages
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (!messages || messages.length === 0) return;
@@ -344,9 +384,12 @@ export async function initWhatsAppBot() {
 
       console.log(`📩 [MSG] from: ${remoteJid} (isGroup: ${isGroup}, prefix: ${hasCommandPrefix}): "${text.slice(0, 50)}"`);
 
-      // In subscribed groups, buffer non-command messages for !summarize (last 100 messages)
-      if (isGroup && db.isSubscribed(remoteJid) && !hasCommandPrefix && !msg.key.fromMe) {
-        const senderName = msg.pushName || (msg.key.participant ? msg.key.participant.replace(/[^0-9]/g, '').slice(-4) : 'Member');
+      // In groups, buffer non-command messages for !summarize (last 100 messages)
+      if (isGroup && !hasCommandPrefix) {
+        const senderName = msg.key.fromMe
+          ? 'You (Owner)'
+          : (msg.pushName || (msg.key.participant ? msg.key.participant.replace(/[^0-9]/g, '').slice(-4) : 'Member'));
+
         bufferGroupMessage(remoteJid, {
           sender: senderName,
           text: text,
