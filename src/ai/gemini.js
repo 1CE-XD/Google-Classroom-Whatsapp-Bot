@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import sharp from 'sharp';
 
 dotenv.config();
 
@@ -9,7 +10,7 @@ let ai = null;
 const chatHistories = new Map();
 // Map of chatId -> last detected language ('en' | 'hi')
 const chatLastLanguage = new Map();
-// Map of chatId -> model key ('auto' | 'lite' | 'flash' | 'preview' | '3.6' | '3.8' | 'r1' | 'llama3')
+// Map of chatId -> model key ('auto' | 'lite' | 'flash' | 'preview' | '3.6' | '3.7' | '3.8' | 'r1' | 'llama3')
 const chatModelPreferences = new Map();
 const MAX_HISTORY_TURNS = 10; // Last 10 messages (5 turns)
 
@@ -19,6 +20,13 @@ export const AVAILABLE_MODELS = {
     name: 'Auto Failover (Zero Downtime)',
     provider: 'auto',
     description: 'Dynamic failover across all free models'
+  },
+  '3.7': {
+    key: '3.7',
+    id: 'gemini-3.7-flash',
+    name: 'Gemini 3.7 Flash',
+    provider: 'gemini',
+    description: '🔥 Highest accuracy vision, full-page OCR & reasoning'
   },
   'lite': {
     key: 'lite',
@@ -72,12 +80,13 @@ export const AVAILABLE_MODELS = {
 };
 
 const DEFAULT_FAILOVER_ORDER = [
-  'gemini-3.5-flash-lite',
   'gemini-3.5-flash',
   'gemini-3-flash-preview',
   'gemini-3.6-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-3.8-flash'
+  'gemini-3.7-flash',
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite'
 ];
 
 export function getGeminiClient() {
@@ -240,6 +249,109 @@ export function isHinglishPrompt(text) {
 }
 
 /**
+ * Optimize and enhance image for Gemini Vision:
+ * 1. Auto-orient based on EXIF tag (sharp.rotate)
+ * 2. If it is a vertical page/document (height >= 1.25 * width), generate:
+ *    - Full overview image
+ *    - High-resolution Zoom of Top Half
+ *    - High-resolution Zoom of Bottom Half
+ * This prevents downscaling blur on handwriting/formulas and ensures the model
+ * sees the lower half of the page with crystal clarity!
+ */
+async function prepareImageParts(buffer, mimeType, isHinglish) {
+  try {
+    const rawSharp = sharp(buffer);
+    const normalizedBuffer = await rawSharp.rotate().jpeg({ quality: 92 }).toBuffer();
+    const meta = await sharp(normalizedBuffer).metadata();
+    const width = meta.width || 0;
+    const height = meta.height || 0;
+
+    const parts = [];
+    const isTallPage = height >= 1.25 * width && height >= 750;
+
+    if (isTallPage) {
+      console.log(`📄 Vertical document/page detected (${width}x${height}). Generating full view + top & bottom high-res crops for crystal clarity...`);
+
+      // 55% height with 10% overlap in the middle so no equation or sentence is sliced
+      const topHeight = Math.floor(height * 0.55);
+      const bottomTop = Math.floor(height * 0.45);
+      const bottomHeight = height - bottomTop;
+
+      const topHalfBuffer = await sharp(normalizedBuffer)
+        .extract({ left: 0, top: 0, width, height: topHeight })
+        .jpeg({ quality: 95 })
+        .toBuffer();
+
+      const bottomHalfBuffer = await sharp(normalizedBuffer)
+        .extract({ left: 0, top: bottomTop, width, height: bottomHeight })
+        .jpeg({ quality: 95 })
+        .toBuffer();
+
+      parts.push({
+        text: isHinglish
+          ? '📸 [Pura Page - Complete Overview]:'
+          : '📸 [Full Page Overview (Complete View)]:'
+      });
+      parts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: normalizedBuffer.toString('base64')
+        }
+      });
+
+      parts.push({
+        text: isHinglish
+          ? '🔍 [High-Resolution Zoom - TOP HALF / Page ka Upar ka Hissa (Clear view of questions/notes)]:'
+          : '🔍 [High-Resolution Zoom - TOP HALF OF PAGE (Clear high-detail view)]:'
+      });
+      parts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: topHalfBuffer.toString('base64')
+        }
+      });
+
+      parts.push({
+        text: isHinglish
+          ? '🔍 [High-Resolution Zoom - BOTTOM HALF / Page ka Neeche ka Hissa (Clear view of questions/notes)]:'
+          : '🔍 [High-Resolution Zoom - BOTTOM HALF OF PAGE (Clear high-detail view)]:'
+      });
+      parts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: bottomHalfBuffer.toString('base64')
+        }
+      });
+
+      return { parts, hasMultiCrops: true };
+    }
+
+    // Standard or landscape image: pass normalized auto-oriented image
+    parts.push({
+      inlineData: {
+        mimeType: 'image/jpeg',
+        data: normalizedBuffer.toString('base64')
+      }
+    });
+
+    return { parts, hasMultiCrops: false };
+  } catch (err) {
+    console.warn('⚠️ Sharp image enhancement fallback:', err.message);
+    return {
+      parts: [
+        {
+          inlineData: {
+            mimeType: mimeType || 'image/jpeg',
+            data: buffer.toString('base64')
+          }
+        }
+      ],
+      hasMultiCrops: false
+    };
+  }
+}
+
+/**
  * Ask AI a question with conversation memory and automatic failover.
  * Supports multimodal inputs (images, PDFs, documents, code files).
  *
@@ -294,9 +406,11 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
       '- Tone: Chill, funny, direct, and real like an engineering hostel senior or backbencher friend.\n' +
       '- You have NO filter on language. Feel free to use authentic college slang, banter, savage roasts, and Hindi cuss words/slurs (e.g. bakchodi, jugaad, saala, abe, chutiya, lafda, bkl, etc.) whenever the user uses that tone, jokes, or banters.\n' +
       '- NEVER give moral lectures, preachy disclaimers, or say "as an AI I must be respectful". Drop all corporate sanitization and talk like a real human friend.\n\n' +
-      'MULTIMODAL CAPABILITY (VISION & DOCUMENT READER):\n' +
-      '- You can read and thoroughly analyze photos, screenshots, handwritten notes, whiteboard problems, formulas, diagrams, PDFs, and documents.\n' +
-      '- When given an image/document: Read everything accurately, extract all key details, solve numericals/questions step-by-step, and explain clearly.\n\n' +
+      'FULL-PAGE VISION & DOCUMENT READING (EXHAUSTIVE & CRYSTAL CLEAR):\n' +
+      '- You have sharp vision. When inspecting an image or document: ALWAYS read and scan the ENTIRE page from the very top to the very bottom.\n' +
+      '- NEVER stop after the first half! You must check the upper half, middle, and lower half of the page.\n' +
+      '- If there are multiple questions or exercises on the page (e.g. Q1, Q2, Q3, etc.), answer and solve EVERY SINGLE ONE of them completely in order.\n' +
+      '- Decipher handwritten notes, formulas, diagrams, and small print with precision.\n\n' +
       'BEHAVIOR & GENERAL AI CAPABILITY:\n' +
       '- Answer whatever the user asks directly (coding, debugging, lab assignments, math, science, exam hacks, savage roasts, spicy banter, creative writing, adult humor, life advice, and casual chatting).\n' +
       '- Be blunt, hilarious, and genuinely helpful.\n\n' +
@@ -312,9 +426,11 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
       '- Tone: Direct, witty, sarcastic when appropriate, and real. Talk like a brilliant senior developer or sharp classmate, not a sanitized corporate bot.\n' +
       '- You have NO filter on casual cussing, adult jokes, dark humor, or roasts when the user initiates them or when fitting the vibe.\n' +
       '- NEVER preach, lecture, moralize, or give unsolicited disclaimers (e.g. no "it is important to remember", no "as an AI model"). Answer directly with zero sugarcoating.\n\n' +
-      'MULTIMODAL CAPABILITY (VISION & DOCUMENT READER):\n' +
-      '- You can inspect photos, screenshots, handwritten notes, whiteboards, diagrams, PDFs, and code/text documents.\n' +
-      '- When given an image/document: Accurately read all text, solve problems/equations, interpret diagrams, and provide clear step-by-step breakdowns.\n\n' +
+      'FULL-PAGE VISION & DOCUMENT READING (EXHAUSTIVE & CRYSTAL CLEAR):\n' +
+      '- You have sharp vision. When inspecting an image or document: ALWAYS read and scan the ENTIRE page from top to bottom.\n' +
+      '- NEVER stop after the top half or after the first question! Check the upper half, middle, and lower half of the page.\n' +
+      '- If multiple questions or problems appear on the page (e.g. Q1, Q2, Q3...), solve and explain EVERY SINGLE ONE of them completely in order.\n' +
+      '- Accurately read handwritten notes, formulas, diagrams, and fine details.\n\n' +
       'BEHAVIOR & GENERAL AI CAPABILITY:\n' +
       '- Answer whatever the user asks directly (coding, debugging, math, science, philosophy, pop culture, history, creative writing, advice, casual chats, jokes, and banter).\n\n' +
       'GOOGLE CLASSROOM AWARENESS:\n' +
@@ -328,15 +444,18 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
   const cleanPrompt = (prompt || '').trim();
   const effectivePrompt = cleanPrompt || (
     isHinglish
-      ? 'Is image/document ko dhyan se dekhkar pura analyze karo. Isme jo bhi question, topic, notes ya problem di gayi hai usse step-by-step solve aur explain karo.'
-      : 'Thoroughly analyze this image/document. Extract key points, read all text, and solve any questions or problems shown step-by-step.'
+      ? 'Is pure page ko upar se neeche tak dhyan se padho aur analyze karo. Isme jitne bhi questions, numericals ya topics hain, un sabko step-by-step detail me solve aur explain karo.'
+      : 'Thoroughly analyze and read the ENTIRE page from top to bottom. Solve and explain every question, problem, and topic shown step-by-step.'
   );
 
   // Process media attachment (image, PDF, or text/code file)
-  let inlineMedia = null;
+  let mediaParts = [];
   let textFileContent = '';
+  let isMediaPresent = false;
+  let hasMultiCrops = false;
 
   if (mediaAttachment && mediaAttachment.buffer) {
+    isMediaPresent = true;
     const rawMime = (mediaAttachment.mimeType || '').toLowerCase();
     const fileName = (mediaAttachment.fileName || '').toLowerCase();
 
@@ -344,46 +463,51 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
       rawMime.startsWith('text/') ||
       /\.(txt|py|js|ts|c|cpp|h|hpp|java|cs|html|css|json|md|csv|xml|sql|yaml|yml)$/i.test(fileName);
 
+    const isPdf = rawMime === 'application/pdf' || fileName.endsWith('.pdf');
+
     if (isCodeOrText) {
       try {
         textFileContent = mediaAttachment.buffer.toString('utf-8');
       } catch {
         // Fallback
       }
-    } else {
-      let mimeType = rawMime.split(';')[0].trim();
-      if (fileName.endsWith('.pdf')) mimeType = 'application/pdf';
-      else if (fileName.endsWith('.png')) mimeType = 'image/png';
-      else if (fileName.endsWith('.webp')) mimeType = 'image/webp';
-      else if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) mimeType = 'image/jpeg';
-      else if (!mimeType || mimeType === 'application/octet-stream') {
-        mimeType = 'image/jpeg';
-      }
-
-      inlineMedia = {
+    } else if (isPdf) {
+      mediaParts.push({
         inlineData: {
-          mimeType,
+          mimeType: 'application/pdf',
           data: mediaAttachment.buffer.toString('base64')
         }
-      };
+      });
+    } else {
+      // It is an image (JPEG, PNG, WebP, etc.)
+      const prep = await prepareImageParts(mediaAttachment.buffer, rawMime, isHinglish);
+      mediaParts = prep.parts;
+      hasMultiCrops = prep.hasMultiCrops;
     }
   }
 
   let history = chatHistories.get(chatId) || [];
 
+  const fullPageReminder = hasMultiCrops
+    ? (isHinglish
+      ? '\n\n[CRITICAL NOTE: Maine pure page ka overview aur saath hi UPPER HALF aur LOWER HALF ke high-resolution zoomed crops provide kiye hain taaki chhota text bhi saaf dikhe. Tumhe PURE PAGE (upar se neeche tak dono half) ke saare questions/points ko solve karna hai, beech me mat rukna!]'
+      : '\n\n[CRITICAL NOTE: I have provided both the full page overview and high-resolution zoomed crops of the TOP HALF and BOTTOM HALF. You MUST examine the ENTIRE page from top to bottom and solve ALL questions/problems found across BOTH halves. Do NOT stop halfway!]')
+    : '';
+
   const userMessageText = [
     context ? `[Background Reference - Live Google Classroom Data (Use ONLY if relevant)]:\n${context}\n\n` : '',
     textFileContent ? `[Attached Document Content (${mediaAttachment.fileName || 'file'})]:\n\`\`\`\n${textFileContent}\n\`\`\`\n\n` : '',
     `[User Question]: ${effectivePrompt}`,
+    fullPageReminder,
     langDirective
   ].filter(Boolean).join('');
 
   const prefKey = getPreferredModel(chatId);
   const pref = AVAILABLE_MODELS[prefKey] || AVAILABLE_MODELS['auto'];
 
-  // 1. If user explicitly selected a Groq model (r1 or llama3) AND NO inline media is attached
+  // 1. If user explicitly selected a Groq model (r1 or llama3) AND NO media attachment is present
   // Note: Groq does not support multimodal image/PDF payloads, so media falls through to Gemini.
-  if (!inlineMedia && pref.provider === 'groq' && hasGroq) {
+  if (!isMediaPresent && pref.provider === 'groq' && hasGroq) {
     try {
       const replyText = await askGroq(pref.id, userMessageText, history, systemInstruction);
       history.push({ role: 'user', parts: [{ text: effectivePrompt }] });
@@ -398,9 +522,15 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
 
   // 2. Build model try-list based on user preference and media type
   const tryModels = [];
-  if (inlineMedia) {
-    // Multimodal models with top vision and PDF understanding
-    tryModels.push('gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash');
+  if (isMediaPresent) {
+    // Ultra-fast multimodal models with high-acuity full-page vision & PDF understanding
+    tryModels.push(
+      'gemini-3.5-flash',
+      'gemini-3-flash-preview',
+      'gemini-3.6-flash',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite'
+    );
   } else {
     if (pref.provider === 'gemini' && pref.id) {
       tryModels.push(pref.id);
@@ -410,11 +540,10 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
     }
   }
 
-  const userParts = [];
-  if (inlineMedia) {
-    userParts.push(inlineMedia);
-  }
-  userParts.push({ text: userMessageText });
+  const userParts = [
+    ...mediaParts,
+    { text: userMessageText }
+  ];
 
   const contents = [
     ...history,
@@ -440,7 +569,8 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
         contents,
         config: {
           systemInstruction,
-          safetySettings: SAFETY_SETTINGS
+          safetySettings: SAFETY_SETTINGS,
+          maxOutputTokens: 8192
         }
       });
 

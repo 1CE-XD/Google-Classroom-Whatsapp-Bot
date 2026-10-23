@@ -76,8 +76,10 @@ export async function extractMediaAttachment(msg) {
       const stream = await downloadContentFromMessage(img, 'image');
       const chunks = [];
       for await (const chunk of stream) chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+      console.log(`📸 Downloaded image attachment (${Math.round(buffer.length / 1024)} KB)`);
       return {
-        buffer: Buffer.concat(chunks),
+        buffer,
         mimeType: img.mimetype || 'image/jpeg',
         fileName: 'image.jpg'
       };
@@ -89,8 +91,10 @@ export async function extractMediaAttachment(msg) {
       const stream = await downloadContentFromMessage(doc, 'document');
       const chunks = [];
       for await (const chunk of stream) chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+      console.log(`📄 Downloaded document attachment (${Math.round(buffer.length / 1024)} KB)`);
       return {
-        buffer: Buffer.concat(chunks),
+        buffer,
         mimeType: doc.mimetype || 'application/pdf',
         fileName: doc.fileName || doc.title || 'document.pdf'
       };
@@ -110,8 +114,10 @@ export async function extractMediaAttachment(msg) {
         const stream = await downloadContentFromMessage(img, 'image');
         const chunks = [];
         for await (const chunk of stream) chunks.push(chunk);
+        const buffer = Buffer.concat(chunks);
+        console.log(`📸 Downloaded quoted image attachment (${Math.round(buffer.length / 1024)} KB)`);
         return {
-          buffer: Buffer.concat(chunks),
+          buffer,
           mimeType: img.mimetype || 'image/jpeg',
           fileName: 'quoted_image.jpg'
         };
@@ -122,8 +128,10 @@ export async function extractMediaAttachment(msg) {
         const stream = await downloadContentFromMessage(doc, 'document');
         const chunks = [];
         for await (const chunk of stream) chunks.push(chunk);
+        const buffer = Buffer.concat(chunks);
+        console.log(`📄 Downloaded quoted document attachment (${Math.round(buffer.length / 1024)} KB)`);
         return {
-          buffer: Buffer.concat(chunks),
+          buffer,
           mimeType: doc.mimetype || 'application/pdf',
           fileName: doc.fileName || doc.title || 'quoted_document.pdf'
         };
