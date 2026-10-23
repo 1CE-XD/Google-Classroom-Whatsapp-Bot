@@ -210,6 +210,8 @@ export async function initWhatsAppBot() {
       const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|docs?|documents?|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary)(\s+.*)?$/i;
       const hasCommandPrefix = commandPattern.test(text);
 
+      console.log(`📩 [MSG] from: ${remoteJid} (isGroup: ${isGroup}, prefix: ${hasCommandPrefix}): "${text.slice(0, 50)}"`);
+
       // In subscribed groups, buffer non-command messages for !summarize (last 100 messages)
       if (isGroup && db.isSubscribed(remoteJid) && !hasCommandPrefix && !msg.key.fromMe) {
         const senderName = msg.pushName || (msg.key.participant ? msg.key.participant.replace(/[^0-9]/g, '').slice(-4) : 'Member');
@@ -227,9 +229,12 @@ export async function initWhatsAppBot() {
       const isSenderOwner = isOwner(msg);
 
       // 1. Direct Messages (1-on-1 personal chats):
-      // Completely disabled in DMs - bot only responds in group chats!
+      // Only commands starting with an explicit prefix (!help, !due, !cls, !docs, etc.) are answered.
+      // Normal conversations ("hey", "hello", etc.) are 100% ignored so friends/contacts are never disturbed!
       if (!isGroup) {
-        continue; // 100% silent in all DMs
+        if (!hasCommandPrefix) {
+          continue; // 100% silent during normal personal conversations
+        }
       }
 
       // 2. Groups:
