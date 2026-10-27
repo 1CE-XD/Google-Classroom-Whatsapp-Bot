@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy &mdash; WhatsApp Google Classroom Assistant</title>
+<style>
+body{font-family:'Segoe UI',Roboto,Arial,sans-serif;margin:0;background:#f6f8fa;color:#1f2328}
+main{max-width:760px;margin:0 auto;padding:40px 24px;background:#fff;min-height:100vh}
+h1{font-size:1.8em;margin-bottom:4px}
+h2{margin-top:1.8em;font-size:1.2em}
+a{color:#0969da}
+ul{line-height:1.7}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid #d0d7de;color:#656d76;font-size:0.92em}
+code{background:#eff2f5;padding:1px 5px;border-radius:4px;font-size:0.9em}
+</style>
+</head>
+<body>
+<main>
+<h1>Privacy Policy</h1>
+<p><strong>Application:</strong> WhatsApp Google Classroom Assistant<br>
+<strong>Last updated:</strong> October 27, 2026</p>
+
+<h2>Who is responsible</h2>
+<p>This is a personal, non-commercial application developed and operated by an individual developer, listed on GitHub as <a href="https://github.com/1CE-XD">1CE-XD</a> ("the operator"). Contact: open an issue at the <a href="https://github.com/1CE-XD/Google-Classroom-Whatsapp-Bot/issues">GitHub issue tracker</a>.</p>
+
+<h2>What Google data the application accesses</h2>
+<p>The application connects to Google with a single Google account (the operator's own) and uses read-only access only:</p>
+<ul>
+<li>Google Classroom: course lists, announcements, coursework (assignments) and due dates, coursework materials, and student submissions visible to that account.</li>
+<li>Google Drive (read-only): only to download files that are shared through Classroom when such a file is explicitly requested in a chat.</li>
+</ul>
+<p>Google never receives write access through this application &mdash; it cannot create, modify or delete anything in Classroom or Drive.</p>
+
+<h2>How the data is used and shared</h2>
+<ul>
+<li>Summaries of new Classroom posts and deadline reminders are posted into the specific WhatsApp groups that the operator configured.</li>
+<li>When a chat member explicitly requests it (for example with a command such as <code>!get</code>), Classroom files are downloaded and delivered into that chat; the requester can choose delivery as a private (direct) WhatsApp message.</li>
+<li>AI features: when the assistant is used, a limited buffer of recent chat messages may be sent to Google's Gemini API to generate summaries or answers. AI conversation history is kept locally and capped in size.</li>
+<li>Nothing is sold, rented or used for advertising. No analytics or trackers are used anywhere.</li>
+</ul>
+
+<h2>Where data is stored</h2>
+<ul>
+<li>Everything lives locally on the operator's own computer: the Google OAuth token (<code>token.json</code>), short rolling chat memory buffers used for summaries, capped AI conversation history, and small settings/state files.</li>
+<li>The application has no separate server infrastructure. This website is fully static: no cookies, no analytics, no logins.</li>
+<li>Messages and media sent through WhatsApp are processed by WhatsApp (Meta) under their own terms and policies; Google data is processed by Google under its terms and policies.</li>
+</ul>
+
+<h2>How long data is kept</h2>
+<p>Chat memory buffers keep roughly the last 100 messages per group and the AI history only the last few exchanges; older items are automatically overwritten. The OAuth token and settings persist until revoked or deleted.</p>
+
+<h2>Your controls</h2>
+<ul>
+<li><strong>Revoke Google access at any time</strong> at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> &mdash; the connection stops immediately.</li>
+<li><strong>Leave a WhatsApp group</strong>, or ask the operator to stop syncing a group.</li>
+<li><strong>Data requests</strong> (export, correction, deletion): open an issue at the GitHub issue tracker above.</li>
+<li>Deleting the local token and memory files removes all locally stored data.</li>
+</ul>
+
+<h2>Changes</h2>
+<p>This policy may be updated occasionally; the date above changes with it. Material changes will also be reflected in the project's GitHub repository.</p>
+
+<footer>
+<p>Owner &amp; developer: 1CE-XD (Yash) &middot; <a href="https://github.com/1CE-XD/Google-Classroom-Whatsapp-Bot/issues">Contact via GitHub</a> &middot; <a href="index.html">Home</a> &middot; <a href="terms.html">Terms</a></p>
+<p>This project is not affiliated with, endorsed by or sponsored by Google, WhatsApp or Meta.</p>
+</footer>
+</main>
+</body>
+</html>
