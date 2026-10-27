@@ -136,7 +136,7 @@ GEMINI_API_KEY=AIzaSy...
 GROQ_API_KEY=gsk_...
 
 # Owner WhatsApp Number (Digits only with country code, supports comma-separated list)
-OWNER_NUMBER=REDACTED_NUMBER
+OWNER_NUMBER=<your owner number - set in untracked .env, never commit real numbers>
 ```
 
 ---

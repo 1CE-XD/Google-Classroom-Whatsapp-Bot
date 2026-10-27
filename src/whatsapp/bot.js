@@ -244,17 +244,17 @@ export function isOwner(msg) {
   if (!msg) return false;
   if (msg.key?.fromMe) return true;
 
-  // Bot's own session ID and LID
-  const botNumber = sock?.user?.id?.replace(/[^0-9]/g, '') || 'REDACTED_NUMBER';
-  const botLid = sock?.user?.lid?.replace(/[^0-9]/g, '') || 'REDACTED_LID';
+  // Bot's own session ID and LID (from the live session only - no hardcoded numbers)
+  const botNumber = (sock?.user?.id || '').replace(/[^0-9]/g, '');
+  const botLid = (sock?.user?.lid || '').replace(/[^0-9]/g, '');
 
   // Configured owner numbers from .env (supports comma-separated list)
-  const envOwners = (process.env.OWNER_NUMBER || 'REDACTED_NUMBER')
+  const envOwners = (process.env.OWNER_NUMBER || '')
     .split(',')
     .map(n => n.replace(/[^0-9]/g, ''))
     .filter(Boolean);
 
-  const allowedIds = new Set([botNumber, botLid, ...envOwners]);
+  const allowedIds = new Set([botNumber, botLid, ...envOwners].filter(Boolean));
 
   const senderJid = msg.key?.participant || msg.key?.remoteJid || '';
   const cleanSender = senderJid.replace(/[^0-9]/g, '');
