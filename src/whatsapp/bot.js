@@ -548,7 +548,6 @@ export async function initWhatsAppBot() {
       const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|docs?|documents?|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary|blacklist|block|unblacklist|unblock)(\s+.*)?$/i;
       const hasCommandPrefix = commandPattern.test(text);
 
-      console.log(`📩 [MSG] from: ${remoteJid} (isGroup: ${isGroup}, prefix: ${hasCommandPrefix}): "${text.slice(0, 50)}"`);
 
       // In groups, buffer non-command messages for !summarize (last 100 messages)
       if (isGroup && !hasCommandPrefix) {
