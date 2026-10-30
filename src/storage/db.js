@@ -10,6 +10,7 @@ if (!fs.existsSync(path.dirname(DB_PATH))) {
 
 const defaultData = {
   subscribedGroups: [], // JIDs of groups where reminders should be posted
+  blacklistedUsers: [], // JIDs or clean phone numbers of blocked users
   autoSyncGroups: {}, // { [groupJid]: { enabled: true, courseId: null, courseName: 'All', autoUploadFiles: true } }
   selectedCourses: {}, // { [chatJid]: { id, name, index } } - active classroom selected per chat
   seenClassroomItems: [], // [itemId] of materials/announcements/coursework already processed
@@ -190,5 +191,62 @@ export const db = {
       return true;
     }
     return false;
+  },
+
+  isBlacklisted(identifier) {
+    if (!identifier) return false;
+    const data = readDb();
+    const list = data.blacklistedUsers || [];
+    const clean = String(identifier).replace(/[^0-9]/g, '');
+    const cleanJid = String(identifier).toLowerCase().trim();
+
+    return list.some(item => {
+      const itemClean = String(item).replace(/[^0-9]/g, '');
+      const itemJid = String(item).toLowerCase().trim();
+      if (cleanJid === itemJid) return true;
+      if (clean && itemClean && (clean === itemClean || clean.includes(itemClean) || itemClean.includes(clean))) return true;
+      return false;
+    });
+  },
+
+  addBlacklist(identifier) {
+    if (!identifier) return false;
+    const data = readDb();
+    if (!data.blacklistedUsers) data.blacklistedUsers = [];
+    const cleanJid = String(identifier).trim();
+    if (!this.isBlacklisted(cleanJid)) {
+      data.blacklistedUsers.push(cleanJid);
+      writeDb(data);
+      return true;
+    }
+    return false;
+  },
+
+  removeBlacklist(identifier) {
+    if (!identifier) return false;
+    const data = readDb();
+    if (!data.blacklistedUsers || data.blacklistedUsers.length === 0) return false;
+    const clean = String(identifier).replace(/[^0-9]/g, '');
+    const cleanJid = String(identifier).toLowerCase().trim();
+
+    const originalLength = data.blacklistedUsers.length;
+    data.blacklistedUsers = data.blacklistedUsers.filter(item => {
+      const itemClean = String(item).replace(/[^0-9]/g, '');
+      const itemJid = String(item).toLowerCase().trim();
+      if (cleanJid === itemJid) return false;
+      if (clean && itemClean && (clean === itemClean || clean.includes(itemClean) || itemClean.includes(clean))) return false;
+      return true;
+    });
+
+    if (data.blacklistedUsers.length !== originalLength) {
+      writeDb(data);
+      return true;
+    }
+    return false;
+  },
+
+  getBlacklist() {
+    const data = readDb();
+    return data.blacklistedUsers || [];
   }
 };

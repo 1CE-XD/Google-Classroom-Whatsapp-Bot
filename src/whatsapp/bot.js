@@ -545,7 +545,7 @@ export async function initWhatsAppBot() {
       const isGroup = remoteJid.endsWith('@g.us');
 
       // Commands MUST start with an explicit prefix (!, /, ., or #) to prevent triggering on normal conversation!
-      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|docs?|documents?|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary)(\s+.*)?$/i;
+      const commandPattern = /^[!/.#](help|commands|menu|due|assignments|recent|files|materials|docs?|documents?|get|download|file|ai|ask|gemini|reset|clear|subscribe|unsubscribe|status|courses|classes|cls|autosync|sync|models?|summarize|summary|blacklist|block|unblacklist|unblock)(\s+.*)?$/i;
       const hasCommandPrefix = commandPattern.test(text);
 
       console.log(`📩 [MSG] from: ${remoteJid} (isGroup: ${isGroup}, prefix: ${hasCommandPrefix}): "${text.slice(0, 50)}"`);
@@ -568,6 +568,13 @@ export async function initWhatsAppBot() {
       const isMentioned = botJid && mentionedJids.some(jid => jid.includes(botJid.split('@')[0]));
 
       const isSenderOwner = isOwner(msg);
+      const senderJid = msg.key.participant || remoteJid;
+
+      // Blacklist Check: If a non-owner user has been blacklisted, silently drop their commands and AI mentions!
+      if (!isSenderOwner && db.isBlacklisted(senderJid)) {
+        console.log(`⛔ [BLACKLIST] Ignored command/mention from blacklisted user: ${senderJid}`);
+        continue;
+      }
 
       // 1. Direct Messages (1-on-1 personal chats):
       // Only commands starting with an explicit prefix (!help, !due, !cls, !docs, etc.) are answered.
@@ -609,7 +616,6 @@ export async function initWhatsAppBot() {
       }
 
       // 3. Anti-Spam / Rate Limiting Check:
-      const senderJid = msg.key.participant || remoteJid;
       const rateStatus = checkRateLimit(senderJid, isSenderOwner);
       if (!rateStatus.allowed) {
         if (rateStatus.shouldWarn) {
@@ -682,6 +688,9 @@ Clear AI conversation memory to start a fresh topic.
 
 🔔 *!subscribe* / 🔕 *!unsubscribe*
 (Owner only) Enable or disable bot notifications in this group.
+
+🚫 *!blacklist @user* / *!unblacklist @user*
+(Owner only) Block or unblock a user from using bot commands and AI in groups or DMs. Type *!blacklist list* to view blocked users.
 
 ℹ️ *!status*
 Check bot connection and auto-sync status.`;
@@ -1403,6 +1412,179 @@ Check bot connection and auto-sync status.`;
           await sendMessage(remoteJid, '✅ *Bot activated in this group!* Group members can now use !due, !recent, !get, !courses, and !ai.', originalMsg);
         } else {
           await sendMessage(remoteJid, 'ℹ️ This group is already activated.', originalMsg);
+        }
+        break;
+      }
+
+      case 'blacklist':
+      case 'block': {
+        if (!isOwner(originalMsg)) {
+          await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can blacklist users.', originalMsg);
+          return;
+        }
+
+        const rawArg = (commandArgs || '').trim();
+
+        // 1. Check if user asked to list blacklisted users
+        if (rawArg.toLowerCase() === 'list' || rawArg.toLowerCase() === 'all' || rawArg.toLowerCase() === 'show') {
+          const list = db.getBlacklist();
+          if (!list || list.length === 0) {
+            await sendMessage(remoteJid, '📋 *Blacklist is currently empty.* No users are blocked.', originalMsg);
+            return;
+          }
+          let text = '🚫 *Currently Blacklisted Users (' + list.length + '):*\n\n';
+          list.forEach((id, i) => {
+            const cleanNum = id.replace(/[^0-9]/g, '');
+            text += (i + 1) + '. @' + cleanNum + '\n';
+          });
+          text += '\n💡 *To unblock:* Type *!unblacklist @user* or *!unblock <phone/number>*';
+
+          const mentionJids = list.filter(id => id.includes('@'));
+          if (sock) {
+            await sock.sendMessage(remoteJid, { text, mentions: mentionJids }, { quoted: originalMsg });
+          } else {
+            await sendMessage(remoteJid, text, originalMsg);
+          }
+          return;
+        }
+
+        // 2. Extract targets: from mention tagging (@user) or quoted message or phone number argument
+        const contextInfo =
+          originalMsg.message?.extendedTextMessage?.contextInfo ||
+          originalMsg.message?.imageMessage?.contextInfo ||
+          originalMsg.message?.documentMessage?.contextInfo;
+
+        const mentionedJids = contextInfo?.mentionedJid || [];
+        const quotedParticipant = contextInfo?.participant;
+
+        const targetJids = new Set();
+
+        // Tagged via @mention
+        for (const jid of mentionedJids) {
+          targetJids.add(jid);
+        }
+
+        // Tagged by replying / quoting someone's message
+        if (quotedParticipant) {
+          targetJids.add(quotedParticipant);
+        }
+
+        // Entered as raw phone number / JID in arguments (e.g. !blacklist 919876543210)
+        if (rawArg) {
+          const numbers = rawArg.match(/\d{7,15}/g) || [];
+          for (const num of numbers) {
+            targetJids.add(num + '@s.whatsapp.net');
+          }
+        }
+
+        if (targetJids.size === 0) {
+          await sendMessage(
+            remoteJid,
+            '❓ *How to Blacklist a User:*\n\n' +
+            '👉 Tag them: *!blacklist @user*\n' +
+            '👉 Reply to their message: Type *!blacklist*\n' +
+            '👉 By phone number: *!blacklist 919876543210*\n' +
+            '👉 View blocked users: *!blacklist list*',
+            originalMsg
+          );
+          return;
+        }
+
+        const added = [];
+        const already = [];
+
+        for (const target of targetJids) {
+          // Never allow blacklisting the bot owner or the bot itself
+          const dummyMsg = { key: { participant: target, remoteJid: target, fromMe: false } };
+          if (isOwner(dummyMsg)) {
+            await sendMessage(remoteJid, '⚠️ *Cannot blacklist the bot owner or bot number!*', originalMsg);
+            continue;
+          }
+
+          const success = db.addBlacklist(target);
+          if (success) {
+            added.push(target);
+          } else {
+            already.push(target);
+          }
+        }
+
+        if (added.length > 0) {
+          const mentionTags = added.map(id => '@' + id.replace(/[^0-9]/g, '')).join(', ');
+          const replyText = '🚫 *User Blacklisted:* ' + mentionTags + '\n\nThey are now blocked from using all bot commands, classroom tools, and AI interaction across all groups and DMs.';
+          if (sock) {
+            await sock.sendMessage(remoteJid, { text: replyText, mentions: added }, { quoted: originalMsg });
+          } else {
+            await sendMessage(remoteJid, replyText, originalMsg);
+          }
+        } else if (already.length > 0) {
+          await sendMessage(remoteJid, 'ℹ️ Selected user is already on the blacklist.', originalMsg);
+        }
+        break;
+      }
+
+      case 'unblacklist':
+      case 'unblock': {
+        if (!isOwner(originalMsg)) {
+          await sendMessage(remoteJid, '🔒 *Permission Denied:* Only the bot owner can unblacklist users.', originalMsg);
+          return;
+        }
+
+        const rawArg = (commandArgs || '').trim();
+
+        const contextInfo =
+          originalMsg.message?.extendedTextMessage?.contextInfo ||
+          originalMsg.message?.imageMessage?.contextInfo ||
+          originalMsg.message?.documentMessage?.contextInfo;
+
+        const mentionedJids = contextInfo?.mentionedJid || [];
+        const quotedParticipant = contextInfo?.participant;
+
+        const targetJids = new Set();
+
+        for (const jid of mentionedJids) {
+          targetJids.add(jid);
+        }
+        if (quotedParticipant) {
+          targetJids.add(quotedParticipant);
+        }
+        if (rawArg) {
+          const numbers = rawArg.match(/\d{7,15}/g) || [];
+          for (const num of numbers) {
+            targetJids.add(num + '@s.whatsapp.net');
+          }
+        }
+
+        if (targetJids.size === 0) {
+          await sendMessage(
+            remoteJid,
+            '❓ *How to Unblacklist a User:*\n\n' +
+            '👉 Tag them: *!unblacklist @user*\n' +
+            '👉 Reply to their message: Type *!unblacklist*\n' +
+            '👉 By phone number: *!unblacklist 919876543210*',
+            originalMsg
+          );
+          return;
+        }
+
+        const removed = [];
+        for (const target of targetJids) {
+          const success = db.removeBlacklist(target);
+          if (success) {
+            removed.push(target);
+          }
+        }
+
+        if (removed.length > 0) {
+          const mentionTags = removed.map(id => '@' + id.replace(/[^0-9]/g, '')).join(', ');
+          const replyText = '✅ *User Unblacklisted:* ' + mentionTags + '\n\nTheir access to bot commands, classroom tools, and AI interaction has been restored.';
+          if (sock) {
+            await sock.sendMessage(remoteJid, { text: replyText, mentions: removed }, { quoted: originalMsg });
+          } else {
+            await sendMessage(remoteJid, replyText, originalMsg);
+          }
+        } else {
+          await sendMessage(remoteJid, 'ℹ️ Selected user was not found on the blacklist.', originalMsg);
         }
         break;
       }
