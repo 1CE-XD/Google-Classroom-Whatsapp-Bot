@@ -8,6 +8,31 @@ An on-demand WhatsApp assistant that:
 
 ---
 
+## ⚠️ Read First: The Bot Runs on Your PC (Important Limitation)
+
+This bot is **not a cloud service**. It is a local Node.js process running on your computer, with no hosting and no server. It only works while:
+
+1. The **launch window is open** (the dark console from `Start-Classroom-Bot.bat`), **and**
+2. Your **computer is on and awake**.
+
+| Situation | What happens to the bot |
+| :--- | :--- |
+| You close the launcher window | The bot **stops immediately** — no replies, no reminders, no auto-sync. |
+| Computer restart, shutdown, sleep or logout | The bot **stops**. Messages sent while it is down are not answered. |
+| The bot crashes on its own | **Auto-recovered** after a few seconds: the launcher restarts it automatically and logs the crash to `data\bot.log`. |
+
+**What is never lost:** the WhatsApp session (`auth_info_baileys/`), chat memory (`data/`) and the Google token (`token.json`) all survive restarts. Deadline reminders that were missed while the bot was off are simply picked up again on the next check cycle after it starts.
+
+**To get the bot back after closing it or restarting the PC:**
+
+1. Double-click **`Start-Classroom-Bot.bat`** (copies live in Desktop, Documents and Downloads).
+2. The boot is silent for **1–2 minutes** (module loading) — that is normal, not frozen.
+3. It reconnects automatically. **No QR re-scan is needed** unless you logged the device out on your phone.
+
+> Tip: for a bot you can rely on daily, either leave the PC on with the window open, or start the launcher once after every logon. Windows Task Scheduler or the Startup folder can do this for you (optional).
+
+---
+
 ## 🛠️ Prerequisites
 
 - **Node.js** v18+ (tested with Node v24)
@@ -74,7 +99,9 @@ npm run auth
 
 ### Step 4: Start the WhatsApp Bot
 
-Run:
+**Recommended on Windows:** double-click **`Start-Classroom-Bot.bat`** instead of running `npm start` — it clears stale lock ports, auto-restarts the bot if it crashes, and mirrors every console line to `data\bot.log`.
+
+Manual alternative (any OS):
 ```bash
 npm start
 ```
