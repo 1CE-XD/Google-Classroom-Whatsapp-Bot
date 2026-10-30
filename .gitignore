@@ -4,6 +4,7 @@ auth_info_baileys*/
 token.json
 credentials.json
 data/*.json
+data/auth_snapshots/
 !data/.gitkeep
 .env
 .DS_Store

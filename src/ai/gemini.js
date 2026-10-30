@@ -516,7 +516,7 @@ async function prepareImageParts(buffer, mimeType, isHinglish) {
  * @param {string} context - Live Classroom context (optional)
  * @param {{ buffer: Buffer, mimeType: string, fileName?: string } | null} mediaAttachment - Image or Document attachment
  */
-export async function askGemini(prompt, chatId = 'default', context = '', mediaAttachment = null) {
+export async function askGemini(prompt, chatId = 'default', context = '', mediaAttachment = null, opts = {}) {
   const client = getGeminiClient();
   const hasGroq = Boolean(process.env.GROQ_API_KEY);
 
@@ -534,9 +534,11 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
     }
   }
 
-  // Input length security check
-  if (prompt && prompt.length > 1500) {
-    return '⚠️ *Question too long:* Please keep your question under 1,500 characters to prevent token exhaustion.';
+  // Input length security check. Machine-built prompts (like the !summarize
+  // transcript) can raise the default cap via opts.maxPromptChars.
+  const maxPromptChars = Number(opts.maxPromptChars) > 0 ? Number(opts.maxPromptChars) : 1500;
+  if (prompt && prompt.length > maxPromptChars) {
+    return `⚠️ *Question too long:* Please keep prompts under ${maxPromptChars.toLocaleString('en-US')} characters to prevent token exhaustion.`;
   }
 
   const isHinglish = isHinglishPrompt(prompt);
@@ -646,7 +648,8 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
     }
   }
 
-  let history = chatHistories.get(chatId) || [];
+  // One-shot jobs (e.g. !summarize) neither read nor pollute the chat memory
+  let history = opts.skipHistory ? [] : (chatHistories.get(chatId) || []);
 
   const fullPageReminder = hasMultiCrops
     ? (isHinglish
@@ -674,8 +677,10 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
       history.push({ role: 'user', parts: [{ text: effectivePrompt }] });
       history.push({ role: 'model', parts: [{ text: replyText }] });
       if (history.length > MAX_HISTORY_TURNS) history = history.slice(-MAX_HISTORY_TURNS);
-      chatHistories.set(chatId, history);
-      saveAiStateDebounced();
+      if (!opts.skipHistory) {
+        chatHistories.set(chatId, history);
+        saveAiStateDebounced();
+      }
       return replyText;
     } catch (err) {
       console.warn(`⚠️ Groq model ${pref.id} failed (${err.message}). Falling back to Gemini pool...`);
@@ -746,8 +751,10 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
       if (history.length > MAX_HISTORY_TURNS) {
         history = history.slice(-MAX_HISTORY_TURNS);
       }
-      chatHistories.set(chatId, history);
-      saveAiStateDebounced();
+      if (!opts.skipHistory) {
+        chatHistories.set(chatId, history);
+        saveAiStateDebounced();
+      }
 
       return replyText;
     } catch (err) {

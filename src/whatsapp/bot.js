@@ -110,6 +110,28 @@ function loadGroupBuffers() {
 // Load existing chat history on startup
 loadGroupBuffers();
 
+// ---- Inbound liveness tracking (catches the "connected but deaf" state) ----
+const LIVENESS_FILE = path.resolve('data', 'liveness.json');
+let lastInboundAt = 0;   // epoch ms of the last message that reached the handler
+let lastDeafAlertAt = 0; // epoch ms of the last inbound-silence warning sent
+let isConnected = false; // live WhatsApp connection state
+try {
+  const lv = JSON.parse(fs.readFileSync(LIVENESS_FILE, 'utf-8'));
+  if (Number(lv.lastInboundAt)) lastInboundAt = Number(lv.lastInboundAt);
+  if (Number(lv.lastDeafAlertAt)) lastDeafAlertAt = Number(lv.lastDeafAlertAt);
+} catch { /* no file yet - fresh start is fine */ }
+
+function persistLiveness() {
+  try {
+    fs.writeFileSync(LIVENESS_FILE, JSON.stringify({ lastInboundAt, lastDeafAlertAt }));
+  } catch { /* never fatal */ }
+}
+
+function recordInbound() {
+  lastInboundAt = Date.now();
+  persistLiveness();
+}
+
 let saveBufferTimer = null;
 function saveGroupBuffersDebounced() {
   if (saveBufferTimer) clearTimeout(saveBufferTimer);
@@ -306,6 +328,61 @@ export function sanitizeError(err) {
     .replace(/\/[a-zA-Z0-9_.\-\/]+\/[a-zA-Z0-9_.\-]+/g, '[REDACTED_PATH]');
 }
 
+// ---- Owner beacons (DM the owner, proving the outbound path works) ----
+let lastOwnerBeaconAt = 0;
+
+function ownerJid() {
+  const envOwner = (process.env.OWNER_NUMBER || '').split(',')[0]?.replace(/[^0-9]/g, '');
+  if (envOwner) return `${envOwner}@s.whatsapp.net`;
+  return botJid || '';
+}
+
+/**
+ * Send a short status DM to the owner. The bot usually shares the owner's
+ * number, so this lands in the "Message yourself" chat - always readable.
+ *
+ * @param {string} text  - Beacon body
+ * @param {boolean} force - Skip the 5-minute anti-spam reconnect throttle
+ */
+async function beaconOwner(text, force = false) {
+  try {
+    if (!sock || !sock.user) return;
+    const now = Date.now();
+    if (!force && now - lastOwnerBeaconAt < 5 * 60 * 1000) return;
+    lastOwnerBeaconAt = now;
+    const target = ownerJid();
+    if (!target) return;
+    const time = new Date().toLocaleString('en-US', { hour12: true });
+    await sock.sendMessage(target, { text: `${text}\n\n🕒 ${time}` });
+    console.log('📤 Status beacon DM sent to the owner.');
+  } catch (e) {
+    console.warn('⚠️ Owner beacon failed (non-fatal):', e.message);
+  }
+}
+
+// ---- Session snapshots (restore instead of QR re-scan after a dead session) ----
+const SNAPSHOT_DIR = path.resolve('data', 'auth_snapshots');
+const SNAPS_TO_KEEP = 3; // rotation only ever touches our own copies inside data/auth_snapshots
+
+function snapshotAuthSession() {
+  try {
+    const src = path.resolve('auth_info_baileys');
+    if (!fs.existsSync(src)) return;
+    fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10);
+    const dest = path.join(SNAPSHOT_DIR, `session-${day}`);
+    fs.rmSync(dest, { recursive: true, force: true }); // refresh today's copy with the current creds
+    fs.cpSync(src, dest, { recursive: true });
+    const snaps = fs.readdirSync(SNAPSHOT_DIR).filter(n => n.startsWith('session-')).sort().reverse();
+    for (const old of snaps.slice(SNAPS_TO_KEEP)) {
+      fs.rmSync(path.join(SNAPSHOT_DIR, old), { recursive: true, force: true });
+    }
+    console.log(`🛟 Session snapshot saved (keeping the newest ${SNAPS_TO_KEEP} in data/auth_snapshots).`);
+  } catch (e) {
+    console.warn('⚠️ Session snapshot failed (non-fatal):', e.message);
+  }
+}
+
 export async function initWhatsAppBot() {
   const authDir = path.resolve('auth_info_baileys');
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -337,6 +414,7 @@ export async function initWhatsAppBot() {
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
       const shouldReconnect = !isLoggedOut && !isReplaced;
 
+      isConnected = false;
       console.log(`🔌 WhatsApp Connection closed (status: ${statusCode}). Reconnecting: ${shouldReconnect}`);
 
       if (isReplaced) {
@@ -350,10 +428,51 @@ export async function initWhatsAppBot() {
       }
     } else if (connection === 'open') {
       botJid = sock.user.id.replace(/:.*@/, '@'); // Normalize bot JID
+      isConnected = true;
       console.log(`\n✅ WhatsApp Bot connected successfully as ${sock.user.name || sock.user.id}!`);
       console.log(`🤖 Bot JID: ${botJid}\n`);
+
+      // Startup beacon: instant proof to the owner that the bot launched and can send
+      beaconOwner(
+        '🟢 *Bot is back online.*\n' +
+        'This message proves the bot can SEND.\n' +
+        '👉 Send !status in a subscribed group to also confirm it can RECEIVE.'
+      ).catch(() => {});
+      // Refresh the on-disk session snapshot for one-command restoration later
+      snapshotAuthSession();
     }
   });
+
+  // ---- Inbound-silence watchdog: a session can go stale ("connected but deaf")
+  // while still able to SEND - this catches exactly that case. ----
+  if (!globalThis.__inboundWatchdog) {
+    globalThis.__inboundWatchdog = setInterval(() => {
+      try {
+        if (!isConnected || !sock || !sock.user) return; // not connected right now
+        if (!lastInboundAt) return;                      // nothing ever heard - metric not meaningful
+        const silentMs = Date.now() - lastInboundAt;
+        const SILENCE_LIMIT = 12 * 60 * 60 * 1000; // 12h with zero incoming messages
+        const ALERT_SPACING = 24 * 60 * 60 * 1000; // at most one warning per day
+        if (silentMs < SILENCE_LIMIT || Date.now() - lastDeafAlertAt < ALERT_SPACING) return;
+        lastDeafAlertAt = Date.now();
+        persistLiveness();
+        const hours = Math.round(silentMs / 3600000);
+        console.log(`⚠️ INBOUND SILENCE: nothing received for ${hours}h - warning the owner via DM.`);
+        beaconOwner(
+          `🟡 *Session health warning: I may be deaf.*\n` +
+          `I have not received a single incoming message for ~${hours}h, although I can still send (this DM proves it).\n\n` +
+          `👉 Send !status in a subscribed group.\n` +
+          `If I do NOT reply there, the device session went stale:\n` +
+          `1. Phone: WhatsApp > Settings > Linked devices > log this PC out\n` +
+          `2. Double-click Start-Classroom-Bot.bat and scan the QR once\n\n` +
+          `💡 Or first try: node pair.mjs restore (brings back the last healthy session)`,
+          true
+        ).catch(() => {});
+      } catch (e) {
+        console.warn('⚠️ Watchdog tick failed (non-fatal):', e.message);
+      }
+    }, 30 * 60 * 1000);
+  }
 
   // Handle historical messages synced from WhatsApp Web on startup
   sock.ev.on('messaging-history.set', ({ messages }) => {
@@ -420,6 +539,7 @@ export async function initWhatsAppBot() {
       ).trim();
 
       if (!text) continue;
+      recordInbound();
 
       const remoteJid = msg.key.remoteJid;
       const isGroup = remoteJid.endsWith('@g.us');
@@ -1339,30 +1459,44 @@ Check bot connection and auto-sync status.`;
           }
         }
 
-        const messages = getGroupMessages(remoteJid, count);
-        if (messages.length < 3) {
+        const requestedMsgs = getGroupMessages(remoteJid, count);
+        if (requestedMsgs.length < 3) {
           await sendMessage(
             remoteJid,
             `⏳ *Not enough messages recorded yet!*\n\n` +
-            `I have buffered ${messages.length} message(s) in this group so far.\n` +
+            `I have buffered ${requestedMsgs.length} message(s) in this group so far.\n` +
             `As members chat, I maintain a rolling log of the last 100 messages. Type *!summarize* anytime once people have had a conversation!`,
             originalMsg
           );
           break;
         }
 
-        await sendMessage(remoteJid, `📋 *Analyzing the last ${messages.length} group messages...*`, originalMsg);
+        // Fit as many of the NEWEST messages as possible into a bounded prompt,
+        // so even a 100-message request can never explode the token budget.
+        const LOG_CHAR_BUDGET = 24000;
+        const includedMsgs = [];
+        let logChars = 0;
+        for (let i = requestedMsgs.length - 1; i >= 0; i--) {
+          const line = `[${requestedMsgs[i].time}] ${requestedMsgs[i].sender}: ${requestedMsgs[i].text}`;
+          if (includedMsgs.length > 0 && logChars + line.length > LOG_CHAR_BUDGET) break;
+          includedMsgs.unshift(requestedMsgs[i]);
+          logChars += line.length;
+        }
+        const omittedCount = requestedMsgs.length - includedMsgs.length;
 
-        const formattedLog = messages
+        await sendMessage(remoteJid, `📋 *Analyzing the last ${includedMsgs.length} group messages...*`, originalMsg);
+
+        const formattedLog = includedMsgs
           .map(m => `[${m.time}] ${m.sender}: ${m.text}`)
           .join('\n');
 
         const prompt =
           `You are an AI assistant summarizing recent messages from a student WhatsApp group chat.\n\n` +
-          `Here is the chronological transcript of the last ${messages.length} messages:\n` +
+          `Here is the chronological transcript of the last ${includedMsgs.length} messages:\n` +
           `--- BEGIN CHAT LOG ---\n` +
           `${formattedLog}\n` +
           `--- END CHAT LOG ---\n\n` +
+          (omittedCount > 0 ? `(${omittedCount} of the oldest messages were left out to keep the analysis focused on the most recent discussion.)\n\n` : '') +
           `Please provide a structured, easy-to-read summary with markdown bullet points:\n` +
           `1. 📌 *Main Topics Discussed*\n` +
           `2. 🎯 *Decisions or Conclusions* (if any)\n` +
@@ -1370,10 +1504,15 @@ Check bot connection and auto-sync status.`;
           `4. 📝 *Action Items or Announcements* (if any)\n\n` +
           `Tone: Clear, objective, and friendly. Match the language of the conversation (if the chat was in Hinglish, respond in natural Hinglish; if English, respond in English).`;
 
-        const summary = await askGemini(prompt, remoteJid, '');
+        // The transcript is machine-generated, not a user question: raise the
+        // length cap and keep this one-off job out of the group's chat memory.
+        const summary = await askGemini(prompt, remoteJid, '', null, {
+          maxPromptChars: 30000,
+          skipHistory: true
+        });
         await sendMessage(
           remoteJid,
-          `📋 *Group Chat Summary (${messages.length} Messages)*\n\n${summary}`,
+          `📋 *Group Chat Summary (${includedMsgs.length} Messages)*\n\n${summary}`,
           originalMsg
         );
         break;

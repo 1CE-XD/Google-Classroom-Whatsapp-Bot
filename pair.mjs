@@ -14,10 +14,36 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import path from 'node:path';
+import fs from 'node:fs';
 import qrcode from 'qrcode-terminal';
 
 const mode = process.argv[2] || 'qr';
 const authDir = path.resolve('auth_info_baileys');
+
+// ---- restore: put the newest healthy session snapshot back into place ----
+if (mode === 'restore') {
+  const SNAP_ROOT = path.resolve('data', 'auth_snapshots');
+  const CUR = path.resolve('auth_info_baileys');
+  const snaps = fs.existsSync(SNAP_ROOT)
+    ? fs.readdirSync(SNAP_ROOT).filter(n => n.startsWith('session-')).sort()
+    : [];
+  const latest = snaps[snaps.length - 1];
+  if (!latest) {
+    console.log('ℹ️  No session snapshots found - nothing to restore.');
+    console.log('   Snapshots are created automatically each time the bot connects.');
+    process.exit(1);
+  }
+  if (fs.existsSync(CUR)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    fs.renameSync(CUR, `${CUR}_broken_${stamp}`);
+    console.log(`📦 Current session folder moved aside (auth_info_baileys_broken_${stamp}).`);
+  }
+  fs.cpSync(path.join(SNAP_ROOT, latest), CUR, { recursive: true });
+  console.log(`✅ Restored the newest healthy snapshot (${latest}) into auth_info_baileys.`);
+  console.log('👉 Start the bot now with Start-Classroom-Bot.bat - it should');
+  console.log('   reconnect WITHOUT any QR scan (no re-login needed).');
+  process.exit(0);
+}
 
 const { state, saveCreds } = await useMultiFileAuthState(authDir);
 const { version } = await fetchLatestBaileysVersion();
@@ -89,6 +115,8 @@ sock.ev.on('connection.update', async (update) => {
     }
     if (mode === 'qr') {
       console.log(`🔌 Connection closed (status ${statusCode}). Exiting - run the bat again if needed.`);
+      console.log('💡 Tip: if the QR keeps failing or the bot later goes silent,');
+      console.log('   try: node pair.mjs restore   (brings back the last healthy session).');
       finish(0);
       return;
     }

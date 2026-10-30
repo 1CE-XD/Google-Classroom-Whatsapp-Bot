@@ -31,6 +31,12 @@ This bot is **not a cloud service**. It is a local Node.js process running on yo
 
 > Tip: for a bot you can rely on daily, either leave the PC on with the window open, or start the launcher once after every logon. Windows Task Scheduler or the Startup folder can do this for you (optional).
 
+**Good news: you do NOT re-scan a QR on every start.** The WhatsApp session persists in `auth_info_baileys/` across restarts, so restarting the PC or the window reconnects on its own. A QR only appears if the session was truly invalidated (device logged out on the phone, or WhatsApp invalidates a stale device) — and the bot has safety nets for exactly that:
+
+- **Startup beacon** — every successful start DMs the owner ("🟢 Bot is back online…"). Instant, visible proof that the bot is up and can send.
+- **Inbound-silence watchdog** — the historical failure mode was a session that looked connected but received nothing. If 12 hours pass with zero incoming messages, the bot DMs you a warning with the exact re-pair steps (at most once per day, no spam).
+- **Session snapshots** — the session folder is copied to `data/auth_snapshots/` at every start (newest 3 kept). If a session ever dies for real, run `node pair.mjs restore` to put the last healthy snapshot back — usually rescuing you from a re-scan entirely.
+
 ---
 
 ## 🛠️ Prerequisites
