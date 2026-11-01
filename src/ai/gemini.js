@@ -318,6 +318,27 @@ function sanitizeAiError(err) {
 }
 
 /**
+ * Classify an error and return a user-friendly WhatsApp message.
+ * Returns null if the error is not a well-known class (caller should fall through).
+ */
+function classifyAiError(errMsg) {
+  const m = (errMsg || '').toLowerCase();
+  if (m.includes('429') || m.includes('rate') || m.includes('quota') || m.includes('exceeded') || m.includes('too many') || m.includes('tokens') || m.includes('limit')) {
+    return '⏳ *Out of free tokens / rate limited.* The AI providers have temporarily run out of free quota. Please try again in a minute or two!';
+  }
+  if (m.includes('503') || m.includes('502') || m.includes('overloaded') || m.includes('demand') || m.includes('unavailable') || m.includes('capacity')) {
+    return '⏳ *AI servers are overloaded right now.* High demand across all providers. Please retry in 1–2 minutes!';
+  }
+  if (m.includes('timeout') || m.includes('abort') || m.includes('timed out') || m.includes('econnreset') || m.includes('econnrefused') || m.includes('fetch failed')) {
+    return '🌐 *Network timeout.* Could not reach AI servers. Please check your internet connection and try again.';
+  }
+  if (m.includes('401') || m.includes('403') || m.includes('invalid') && m.includes('key')) {
+    return '🔑 *API key issue.* One or more AI provider keys in `.env` are invalid or expired. Please check and update them.';
+  }
+  return null;
+}
+
+/**
  * Universal OpenAI-compatible requester (Groq, OpenRouter, Cerebras)
  */
 async function queryOpenAICompatible({
@@ -950,7 +971,8 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
     }
 
     console.error('All Gemini vision models exhausted:', lastError?.message || lastError);
-    return '❌ *Vision Error:* ' + sanitizeAiError(lastError);
+    const friendly = classifyAiError(String(lastError?.message || lastError));
+    return friendly || ('❌ *Vision Error:* ' + sanitizeAiError(lastError));
   }
 
   // Case 2: Pure text question (!isMediaPresent)
@@ -1042,7 +1064,9 @@ export async function askGemini(prompt, chatId = 'default', context = '', mediaA
     console.warn('⚠️ Lifeline fallback failed (' + err.message + ').');
   }
 
-  return '⏳ *AI is temporarily busy:* All free AI providers (Groq, OpenRouter, Gemini) are currently experiencing high load. Please try your question again in 1 minute!';
+  // All providers exhausted — give a clear, helpful message
+  console.error('All AI providers exhausted. No response could be generated.');
+  return '⏳ *Out of free tokens right now!* All AI providers (Groq, OpenRouter, Gemini) have hit their free quota limits. Please try again in 1–2 minutes — tokens reset automatically!';
 }
 
 
