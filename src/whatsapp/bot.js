@@ -680,7 +680,7 @@ Ask AI with conversational memory.
 Summarize recent group chats and discussions (e.g. *!summarize 50* or *!summarize 100*)!
 
 ⚙️ *!models* or *!model <name>*
-View & switch free AI models (auto, lite, flash, preview, r1, llama3).
+View & switch free AI models (auto, llama3, fast, r1, mixtral, qwen, gemini).
 
 🧹 *!clear* or *!reset*
 Clear AI conversation memory to start a fresh topic.
@@ -1781,15 +1781,19 @@ Check bot connection and auto-sync status.`;
 
         const switched = setPreferredModel(remoteJid, arg);
         if (switched) {
+          let extra = '';
+          if (switched.missingKey) {
+            extra = `\n\n💡 *Note:* Add \`${switched.missingKey}\` to \`.env\` (${switched.keyUrl}) to enable direct access. In the meantime, queries will use available free models automatically!`;
+          }
           await sendMessage(
             remoteJid,
-            `✅ *AI model set to ${switched.name}!* 🎯\n_${switched.description}_`,
+            `✅ *AI model set to ${switched.name}!* 🎯\n_${switched.description}_${extra}`,
             originalMsg
           );
         } else {
           await sendMessage(
             remoteJid,
-            `❌ *Unrecognized model "${arg}".*\n👉 Type *!models* to see all available model names (e.g. *!model lite*, *!model flash*, *!model auto*).`,
+            `❌ *Unrecognized model "${arg}".*\n👉 Type *!models* to see all available models (e.g. *!model llama3*, *!model r1*, *!model fast*, *!model auto*).`,
             originalMsg
           );
         }

@@ -6,6 +6,9 @@ credentials.json
 data/*.json
 data/auth_snapshots/
 !data/.gitkeep
+
+# machine-only persona/tone overlays - live locally, never published
+src/ai/*.local.*
 .env
 .DS_Store
 *.log

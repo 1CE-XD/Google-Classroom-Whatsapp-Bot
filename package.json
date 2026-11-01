@@ -6,6 +6,9 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "start:force": "node src/index.js --force",
+    "stop": "node scripts/kill-bot.js",
+    "restart": "node scripts/kill-bot.js && node src/index.js",
     "auth": "node src/google/auth-setup.js"
   },
   "dependencies": {

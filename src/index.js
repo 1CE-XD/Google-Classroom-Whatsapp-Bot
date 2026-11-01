@@ -4,6 +4,7 @@ import net from 'net';
 import { CREDENTIALS_PATH, TOKEN_PATH } from './google/auth.js';
 import { initWhatsAppBot } from './whatsapp/bot.js';
 import { startScheduler } from './scheduler/reminders.js';
+import { stopRunningBot } from '../scripts/kill-bot.js';
 
 // Global error handlers to prevent unhandled socket disconnect crashes
 process.on('unhandledRejection', (reason) => {
@@ -28,24 +29,34 @@ process.on('uncaughtException', (err) => {
  * If another instance is already running, this immediately notifies the user and exits cleanly.
  */
 function acquireSingleInstanceLock(port = 48591) {
+  if (process.argv.includes('--force') || process.argv.includes('-f')) {
+    stopRunningBot();
+  }
+
   return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        console.error('\n====================================================');
-        console.error('⚠️  ANOTHER BOT INSTANCE IS ALREADY RUNNING!');
-        console.error('====================================================');
-        console.error('Another window or background process is already running this bot.');
-        console.error('Running two instances at once causes WhatsApp connection conflict (Status 440).');
-        console.error('👉 Please close your other terminal window before starting a new one.\n');
-        process.exit(0);
-      }
-      resolve(server);
-    });
-    server.once('listening', () => {
-      resolve(server);
-    });
-    server.listen(port, '127.0.0.1');
+    const tryListen = () => {
+      const server = net.createServer();
+      server.once('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.error('\n====================================================');
+          console.error('⚠️  ANOTHER BOT INSTANCE IS ALREADY RUNNING!');
+          console.error('====================================================');
+          console.error('Another window or background process is already running this bot.');
+          console.error('Running two instances at once causes WhatsApp connection conflict (Status 440).');
+          console.error('👉 To stop the old process and restart cleanly:');
+          console.error('   npm run restart');
+          console.error('   or run: npm run stop\n');
+          process.exit(0);
+        }
+        resolve(server);
+      });
+      server.once('listening', () => {
+        resolve(server);
+      });
+      server.listen(port, '127.0.0.1');
+    };
+
+    tryListen();
   });
 }
 
