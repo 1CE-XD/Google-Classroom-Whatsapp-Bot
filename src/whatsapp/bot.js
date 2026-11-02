@@ -22,6 +22,7 @@ import {
   getClassroomContextSummary
 } from '../google/classroom.js';
 import { askGemini, clearChatHistory, getModelsListText, setPreferredModel, getPreferredModel } from '../ai/gemini.js';
+import { bindSessionRepair } from './session-repair.js';
 
 let sock = null;
 let botJid = null;
@@ -131,6 +132,14 @@ function recordInbound() {
   lastInboundAt = Date.now();
   persistLiveness();
 }
+
+// ---- Auto session-repair (Bad MAC storm self-healing; see ./session-repair.js) ----
+let lastConnectedAt = 0; // epoch ms of the last successful 'open'
+bindSessionRepair({
+  isConnected: () => isConnected,
+  getConnectedAt: () => lastConnectedAt,
+  sendOwnerBeacon: beaconOwner // (text, force) owner DM primitive
+});
 
 let saveBufferTimer = null;
 function saveGroupBuffersDebounced() {
@@ -429,6 +438,7 @@ export async function initWhatsAppBot() {
     } else if (connection === 'open') {
       botJid = sock.user.id.replace(/:.*@/, '@'); // Normalize bot JID
       isConnected = true;
+      lastConnectedAt = Date.now();
       console.log(`\n✅ WhatsApp Bot connected successfully as ${sock.user.name || sock.user.id}!`);
       console.log(`🤖 Bot JID: ${botJid}\n`);
 

@@ -5,6 +5,7 @@ token.json
 credentials.json
 data/*.json
 data/auth_snapshots/
+data/auth_repair_backups/
 !data/.gitkeep
 
 # machine-only persona/tone overlays - live locally, never published

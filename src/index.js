@@ -5,6 +5,12 @@ import { CREDENTIALS_PATH, TOKEN_PATH } from './google/auth.js';
 import { initWhatsAppBot } from './whatsapp/bot.js';
 import { startScheduler } from './scheduler/reminders.js';
 import { stopRunningBot } from '../scripts/kill-bot.js';
+import { installDecryptObserver } from './whatsapp/session-repair.js';
+
+// Auto session-repair: watches libsignal's raw decrypt-failure prints ("Bad MAC",
+// "Failed to decrypt message with any known session...") and self-heals a stale
+// one-chat session. See src/whatsapp/session-repair.js for the safety rules.
+installDecryptObserver();
 
 // Global error handlers to prevent unhandled socket disconnect crashes
 process.on('unhandledRejection', (reason) => {
