@@ -48,11 +48,12 @@ import path from 'path';
 // ---- Tuning constants (REPAIR_* env vars exist only for the offline drill) --
 const WINDOW_MS = 10 * 60 * 1000;              // rolling failure window
 const STORM_THRESHOLD = 12;                    // failures in window = storm
-const RESTART_GRACE_MS = 8 * 1000;             // let logs/DMs flush before exit
 const THROTTLE_MS = 90 * 1000;                 // one summary per chat per this
 const ARM_DELAY_MS =
   Number(process.env.REPAIR_ARM_DELAY_MS) || 45 * 1000; // double-confirm beat
-const PER_CHAT_COOLDOWN_MS = 30 * 60 * 1000;   // min spacing per chat
+const PER_CHAT_COOLDOWN_MS = 8 * 60 * 1000;    // min spacing per chat; each
+                                               // repair needs a FRESH storm so
+                                               // this cannot loop
 const PER_DAY_CAP = 3;                         // repairs per day (all chats)
 const BOOT_GRACE_MS =
   Number(process.env.REPAIR_BOOT_GRACE_MS) || 2 * 60 * 1000; // uptime gate
@@ -276,6 +277,12 @@ async function performRepair(chat) {
       return { dryRun: true, targets };
     }
 
+    // ---- order matters: DM FIRST, then move the keys.
+    // A WhatsApp send/rotate activity can flush the socket's in-memory key map
+    // back to disk; if we moved the files first, the dying process could
+    // re-save some of them (it really did). Hence: notify -> move -> settle.
+    const dmOk = await notifyOwner(chat, targets.length, kindForTargets());
+
     // ---- real repair: move (never delete) -> backup dir --------------------
     const stamp = new Date(now).toISOString().replace(/[:T]/g, '-').slice(0, 19);
     const dest = path.join(BACKUP_DIRNAME, `${chat}-${stamp}`);
@@ -294,14 +301,6 @@ async function performRepair(chat) {
       return { skipped: 'file-locked', locked };
     }
 
-    // verify: gone from the auth dir, present in the backup dir
-    const verified =
-      moved.every(n => !fs.existsSync(path.join(dir, n))) &&
-      fs.readdirSync(dest).length === moved.length;
-    if (!verified) {
-      report('[SESSION-REPAIR] warning: move verification mismatch (the live session may have re-created a file).');
-    }
-
     // bookkeeping BEFORE the restart so caps survive the reboot
     state.count += 1;
     state.chats[chat] = now;
@@ -309,12 +308,43 @@ async function performRepair(chat) {
 
     report(`[SESSION-REPAIR] stale session repaired for one chat (${chat}): moved ${moved.length} key file(s) into ${BACKUP_DIRNAME}/${path.basename(dest)} (backup kept, nothing deleted).`);
 
-    const dmOk = await notifyOwner(chat, moved, kindForTargets(moved));
+    // ---- settle: the still-alive socket may keep flushing key records.
+    // Wait for two consecutive clean scans so the restart reads a keys-free
+    // auth dir; anything that reappears goes to the same backup.
+    let cleanScans = 0;
+    let reMoved = 0;
+    for (let i = 0; i < 25 && cleanScans < 2; i++) {
+      await new Promise(r => setTimeout(r, 350));
+      const encore = selectRepairTargets(dir, chat);
+      if (encore.length) {
+        cleanScans = 0;
+        for (const name of encore) {
+          try {
+            fs.renameSync(path.join(dir, name), path.join(dest, name));
+            reMoved++;
+          } catch { /* keep scanning; the exit sweep will catch stragglers */ }
+        }
+      } else {
+        cleanScans++;
+      }
+    }
+    if (reMoved) report(`[SESSION-REPAIR] socket re-flushed ${reMoved} key file(s) during the settle loop - re-moved to the backup.`);
+    if (cleanScans < 2) report('[SESSION-REPAIR] note: files kept reappearing; a final synchronous sweep runs on exit.');
 
-    report(`[SESSION-REPAIR] restarting in ${RESTART_GRACE_MS / 1000} s to reload the session fresh (auto-restart brings the bot back in ~2 min; its beacon DM will confirm).`);
+    // last-chance sweep inside the exit hook (synchronous, best effort)
+    process.once('exit', () => {
+      try {
+        const authDir = resolveAuthDir();
+        for (const name of selectRepairTargets(authDir, chat)) {
+          try { fs.renameSync(path.join(authDir, name), path.join(dest, name)); } catch { /* out of options */ }
+        }
+      } catch { /* nothing else can be done during exit */ }
+    });
+
     shuttingDown = true;
-    setTimeout(() => process.exit(0), RESTART_GRACE_MS);
-    return { moved, backupDir: dest, dmOk, verified };
+    report('[SESSION-REPAIR] restarting now (auto-restart brings the bot back in ~2 min; its beacon DM will confirm).');
+    process.exit(0);
+    return { moved, backupDir: dest, dmOk };
   } finally {
     repairInFlight = false;
   }
@@ -324,16 +354,16 @@ function kindForTargets() {
   return 'Bad MAC / key-counter decryption failures';
 }
 
-async function notifyOwner(chat, moved, kind) {
+async function notifyOwner(chat, count, kind) {
   if (typeof runtime.sendOwnerBeacon !== 'function') return false;
   const text =
     '🛠️ *Auto session repair performed*\n\n' +
     `One chat (id ${chat}) could not be decrypted: repeated ${kind} ` +
     `(${STORM_THRESHOLD}+ in 10 minutes) - its locally stored session keys were stale.\n\n` +
-    'What I did (reversible - nothing was deleted):\n' +
-    `• Moved ${moved.length} stale key file(s) for that chat into ${BACKUP_DIRNAME}/ (kept as backup)\n` +
-    '• Restarting now to load fresh session keys - back online in ~2 minutes.\n\n' +
-    'If this repeats on different days, it is WhatsApp rotating keys faster than an unofficial client can track:\n' +
+    'What I am doing right now (reversible - nothing gets deleted):\n' +
+    `• Moving ${count} stale key file(s) for that chat into data (kept as backup)\n` +
+    '• Then a clean restart to load fresh session keys - back online in ~2 minutes.\n\n' +
+    'If this keeps repeating, it is WhatsApp rotating keys faster than an unofficial client can track:\n' +
     '👉 node pair.mjs restore  (brings back the last healthy session)\n' +
     'or relink the device once with a fresh QR scan.';
   try {
