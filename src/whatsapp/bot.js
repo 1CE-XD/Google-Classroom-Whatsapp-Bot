@@ -134,10 +134,8 @@ function recordInbound() {
 }
 
 // ---- Auto session-repair (Bad MAC storm self-healing; see ./session-repair.js) ----
-let lastConnectedAt = 0; // epoch ms of the last successful 'open'
 bindSessionRepair({
   isConnected: () => isConnected,
-  getConnectedAt: () => lastConnectedAt,
   sendOwnerBeacon: beaconOwner // (text, force) owner DM primitive
 });
 
@@ -427,7 +425,12 @@ export async function initWhatsAppBot() {
       console.log(`🔌 WhatsApp Connection closed (status: ${statusCode}). Reconnecting: ${shouldReconnect}`);
 
       if (isReplaced) {
-        console.warn('⚠️ Connection replaced by another session/device. Reconnection halted to prevent loop.');
+        // A second device/process logged in with the same session. The old
+        // socket goes half-dead here (can send, receives nothing) - staying up
+        // just leaves a zombie. Restart cleanly instead: the launcher brings
+        // a single fresh instance back in seconds.
+        console.warn('⚠️ Connection replaced by another session/device. Restarting cleanly in 5 s.');
+        setTimeout(() => process.exit(0), 5000);
       } else if (isLoggedOut) {
         console.error('⚠️ Device logged out. Please remove auth_info_baileys and scan QR again.');
       } else if (shouldReconnect) {
@@ -438,7 +441,6 @@ export async function initWhatsAppBot() {
     } else if (connection === 'open') {
       botJid = sock.user.id.replace(/:.*@/, '@'); // Normalize bot JID
       isConnected = true;
-      lastConnectedAt = Date.now();
       console.log(`\n✅ WhatsApp Bot connected successfully as ${sock.user.name || sock.user.id}!`);
       console.log(`🤖 Bot JID: ${botJid}\n`);
 

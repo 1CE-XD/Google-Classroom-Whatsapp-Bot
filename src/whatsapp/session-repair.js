@@ -23,9 +23,15 @@
  *      gone, so WhatsApp re-distributes fresh keys and the chat decrypts again.
  *
  * Safety rules baked in:
- *   - max MAX_REPAIRS_PER_DAY repairs per day, PER_CHAT_COOLDOWN_MS per chat
- *   - never within the first MIN_CONNECT_AGE_MS of a (re)connect (a fresh
- *     boot backlog can look like a storm for a moment)
+ *   - max PER_DAY_CAP repairs per day, PER_CHAT_COOLDOWN_MS per chat
+ *   - boot grace: a fixed uptime window after process start (BOOT_GRACE_MS)
+ *     during which failures are ignored - cold-start / reconnect backlog can
+ *     mimic a storm but can NEVER be repaired (those messages are unreadable)
+ *   - churn-proof: the gate keys off PROCESS UPTIME, never off the latest
+ *     'open' event (a churning connection must not reset the grace window)
+ *   - on ANY skip (cap/cooldown/boot-grace/not-connected/locked), that chat's
+ *     failure window is cleared - only a FRESH 12-failure burst can re-arm;
+ *     stale backlog flooding can never keep a repair spinning
  *   - only that chat's own session/sender-key records are moved; never
  *     creds.json, pre-key-*, app-state-* files, never other chats
  *   - the running bot's state (auth_info_baileys and its *backup/*corrupted/
@@ -48,7 +54,14 @@ const ARM_DELAY_MS =
   Number(process.env.REPAIR_ARM_DELAY_MS) || 45 * 1000; // double-confirm beat
 const PER_CHAT_COOLDOWN_MS = 30 * 60 * 1000;   // min spacing per chat
 const PER_DAY_CAP = 3;                         // repairs per day (all chats)
-const MIN_CONNECT_AGE_MS = 2 * 60 * 1000;      // age of (re)connection gate
+const BOOT_GRACE_MS =
+  Number(process.env.REPAIR_BOOT_GRACE_MS) || 2 * 60 * 1000; // uptime gate
+const PROCESS_BOOT_MS = Date.now();
+let bootAnchor = PROCESS_BOOT_MS;              // drill can shift this
+
+function inBootGrace() {
+  return Date.now() - bootAnchor < BOOT_GRACE_MS;
+}
 const DRY_RUN = process.env.REPAIR_DRY_RUN === '1';
 
 const STATE_FILE = path.resolve('data', 'session-repair-state.json');
@@ -57,7 +70,6 @@ const BACKUP_DIRNAME = path.join('data', 'auth_repair_backups');
 // runtime hooks, bound by bot.js (getters so reconnects are always current)
 const runtime = {
   isConnected: () => false,
-  getConnectedAt: () => 0,
   sendOwnerBeacon: null
 };
 
@@ -100,7 +112,6 @@ loadState();
 export function bindSessionRepair(binding) {
   if (!binding) return;
   if (typeof binding.isConnected === 'function') runtime.isConnected = binding.isConnected;
-  if (typeof binding.getConnectedAt === 'function') runtime.getConnectedAt = binding.getConnectedAt;
   if (typeof binding.sendOwnerBeacon === 'function') runtime.sendOwnerBeacon = binding.sendOwnerBeacon;
 }
 
@@ -151,6 +162,7 @@ function observeConsoleError(args) {
   if (text0.startsWith('Session error:')) {
     const info = parseFailureLine(args);
     if (!info) return false; // unrecognised shape: leave the line untouched
+    if (inBootGrace()) return false; // boot/reconnect backlog is not countable
     pushFailure(info.chat);
     const n = failuresInWindow(info.chat);
     if (n < STORM_THRESHOLD) return false; // quiet failures keep old behaviour
@@ -182,7 +194,7 @@ function report(...args) {
 }
 
 function maybeArm(chat) {
-  if (shuttingDown || repairInFlight) return;
+  if (shuttingDown || repairInFlight || inBootGrace()) return;
   if (armed && armed.chat === chat) return; // already armed for this chat
   armed = { chat, fireAt: Date.now() + ARM_DELAY_MS };
   setTimeout(() => { maybeFire(chat); }, ARM_DELAY_MS + 250);
@@ -221,35 +233,40 @@ function resolveAuthDir() {
     : path.resolve('auth_info_baileys');
 }
 
+/** Every skip resets that chat's window: only a FRESH storm may re-arm.
+ * This is what guarantees backlog floods / connection churn can never spin the
+ * repair loop without end. */
+function skipRepair(chat, why) {
+  failures.delete(chat);
+  report(`[SESSION-REPAIR] repair skipped for chat ${chat}: ${why} (failure window reset; a fresh storm re-arms).`);
+  return { skipped: why };
+}
+
 async function performRepair(chat) {
   const now = Date.now();
   repairInFlight = true;
   try {
     if (state.day !== today(now)) state = { day: today(now), count: 0, chats: state.chats };
 
+    if (inBootGrace()) {
+      skipRepair(chat, 'boot grace period not over (backlog-failure protection)');
+      return { skipped: 'boot-grace' };
+    }
     if (state.count >= PER_DAY_CAP) {
-      report(`[SESSION-REPAIR] daily repair cap (${PER_DAY_CAP}/day) reached - skipping repair for chat ${chat}.`);
-      return { skipped: 'daily-cap' };
+      return skipRepair(chat, `daily repair cap (${PER_DAY_CAP}/day) reached`);
     }
     const last = Number(state.chats[chat]) || 0;
     if (now - last < PER_CHAT_COOLDOWN_MS) {
-      report(`[SESSION-REPAIR] chat ${chat} repaired ${Math.round((now - last) / 60000)} min ago (cooldown active) - skipping.`);
-      return { skipped: 'cooldown' };
+      return skipRepair(chat, `repaired ${Math.round((now - last) / 60000)} min ago (cooldown active)`);
     }
     if (!runtime.isConnected()) {
-      report('[SESSION-REPAIR] not connected right now - skipping (will retry on the next storm window).');
-      return { skipped: 'not-connected' };
-    }
-    if (now - (Number(runtime.getConnectedAt()) || 0) < MIN_CONNECT_AGE_MS) {
-      report('[SESSION-REPAIR] connection too fresh - skipping (a boot backlog can mimic a storm).');
-      return { skipped: 'connect-fresh' };
+      return skipRepair(chat, 'not connected right now');
     }
 
     const dir = resolveAuthDir();
     const targets = selectRepairTargets(dir, chat);
     if (!targets.length) {
-      report(`[SESSION-REPAIR] no stale key files matched chat ${chat} - nothing to move, no restart.`);
-      return { skipped: 'no-targets' };
+      return skipRepair(chat, 'no stale key files matched this chat');
     }
 
     // ---- drill mode: describe, but touch nothing ---------------------------
@@ -273,7 +290,7 @@ async function performRepair(chat) {
       } catch { locked.push(name); }
     }
     if (locked.length) {
-      report(`[SESSION-REPAIR] ${locked.length} file(s) locked, could not be moved - NOT restarting this cycle (will retry on the next storm window): ${locked.join(', ')}`);
+      skipRepair(chat, `file-locked: ${locked.join(', ')}`);
       return { skipped: 'file-locked', locked };
     }
 
@@ -341,6 +358,17 @@ export function installDecryptObserver() {
     } catch { /* fall through and print the original line */ }
     origError(...args);
   };
+  if (DRY_RUN) {
+    report('[SESSION-REPAIR] module active (DRY-RUN drill: simulations only, nothing moves).');
+  } else {
+    report(`[SESSION-REPAIR] decrypt-failure watch active - boot grace ${Math.round(BOOT_GRACE_MS / 60000)} min; storms repair themselves automatically.`);
+    // one-time gate close: drop any pre-grace backlog echoes so a stale
+    // window can never arm on its own after the grace
+    setTimeout(() => {
+      failures.clear();
+      report('[SESSION-REPAIR] boot grace over - live decrypt failures are counted from now on.');
+    }, BOOT_GRACE_MS + 1000);
+  }
 }
 
 // ---- offline drill hooks ----------------------------------------------------
@@ -352,6 +380,13 @@ export function __drillSimulateFailure(chat) {
   const n = failuresInWindow(chat);
   if (n >= STORM_THRESHOLD) maybeArm(chat);
   return n;
+}
+
+export function __drillOverrideBoot(offsetMs) {
+  if (process.env.REPAIR_DRY_RUN !== '1') {
+    throw new Error('boot override requires REPAIR_DRY_RUN=1');
+  }
+  bootAnchor = Date.now() + offsetMs;
 }
 
 export function __drillPeek(chat) {
