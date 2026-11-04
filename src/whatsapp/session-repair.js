@@ -15,6 +15,10 @@
  *        - below STORM_THRESHOLD: behaviour is 100% unchanged (lines print).
  *        - at/above STORM_THRESHOLD ("storm"): repeated stacks are throttled
  *          to one summary line per 90 s instead of flooding the log.
+ *        - inside the boot-grace window the raw backlog wall (stale queued
+ *          replays that can never decrypt) is swallowed: counted quietly with
+ *          a throttled progress line, plus a final recap when live counting
+ *          starts - no more stack-trace storm on every reboot.
  *   2. A confirmed storm arms, then performRepair() moves ONLY the stale key
  *      files of that one chat (session-<id>*.json + sender-key-*--<id>--*.json)
  *      into data/auth_repair_backups/<id>-<stamp>/, verifies the move, DMs the
@@ -119,6 +123,20 @@ export function bindSessionRepair(binding) {
 // ---- per-chat failure window ------------------------------------------------
 const failures = new Map();      // chatId -> timestamp[]
 const lastSummaryAt = new Map(); // chatId -> epoch ms
+// boot-grace only: stale queued replays (encrypted with the pre-rotation
+// session) can never be decrypted, so the raw wall is swallowed and summarised
+// instead of printed - they are dropped, never counted as live failures.
+const bootBacklog = { total: 0, lastSummaryAt: 0, chats: new Map() };
+
+function backlogSummary(note) {
+  const chats = [...bootBacklog.chats].map(([c, n]) => `${c} x${n}`).join(', ');
+  return (
+    `[SESSION-REPAIR] ${note}: swallowed ${bootBacklog.total} stale-backlog decrypt failures` +
+    (chats ? ` (${chats})` : '') +
+    ' - queued messages encrypted with the old session keys can never be restored, ' +
+    'they are dropped and not counted as live.'
+  );
+}
 let lastStormChat = null;        // chatId of the most recent open storm
 let armed = null;                // { chat, fireAt } single slot
 let repairInFlight = false;
@@ -163,7 +181,17 @@ function observeConsoleError(args) {
   if (text0.startsWith('Session error:')) {
     const info = parseFailureLine(args);
     if (!info) return false; // unrecognised shape: leave the line untouched
-    if (inBootGrace()) return false; // boot/reconnect backlog is not countable
+    if (inBootGrace()) {
+      // stale queued replays: not countable, not printable - swallow the raw
+      // stack wall and emit a single throttled progress line instead.
+      bootBacklog.total += 1;
+      bootBacklog.chats.set(info.chat, (bootBacklog.chats.get(info.chat) || 0) + 1);
+      if (Date.now() - bootBacklog.lastSummaryAt >= THROTTLE_MS) {
+        bootBacklog.lastSummaryAt = Date.now();
+        report(backlogSummary('inside the grace window so far'));
+      }
+      return true; // consumed - never printed raw
+    }
     pushFailure(info.chat);
     const n = failuresInWindow(info.chat);
     if (n < STORM_THRESHOLD) return false; // quiet failures keep old behaviour
@@ -183,7 +211,9 @@ function observeConsoleError(args) {
 
   if (text0 === 'Failed to decrypt message with any known session...') {
     // header line of the same failing message; silence it only while a storm
-    // for a known chat is open, otherwise print like before
+    // for a known chat is open, otherwise print like before (inside boot
+    // grace the whole backlog wall is summarised, so silence it there too)
+    if (inBootGrace()) return true;
     return !!(lastStormChat && failuresInWindow(lastStormChat) >= STORM_THRESHOLD);
   }
 
@@ -395,6 +425,14 @@ export function installDecryptObserver() {
     // one-time gate close: drop any pre-grace backlog echoes so a stale
     // window can never arm on its own after the grace
     setTimeout(() => {
+      if (bootBacklog.total > 0) {
+        report(backlogSummary('boot recap'));
+      } else {
+        report('[SESSION-REPAIR] boot backlog was clean - no stale replays inside the grace window.');
+      }
+      bootBacklog.total = 0;
+      bootBacklog.lastSummaryAt = 0;
+      bootBacklog.chats.clear();
       failures.clear();
       report('[SESSION-REPAIR] boot grace over - live decrypt failures are counted from now on.');
     }, BOOT_GRACE_MS + 1000);
