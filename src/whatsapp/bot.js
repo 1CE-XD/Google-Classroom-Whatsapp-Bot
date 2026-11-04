@@ -136,7 +136,22 @@ function recordInbound() {
 // ---- Auto session-repair (Bad MAC storm self-healing; see ./session-repair.js) ----
 bindSessionRepair({
   isConnected: () => isConnected,
-  sendOwnerBeacon: beaconOwner // (text, force) owner DM primitive
+  sendOwnerBeacon: beaconOwner, // (text, force) owner DM primitive
+  closeSocket: () => {
+    try { sock?.ws?.close(); } catch { /* ignore */ }
+    try { sock?.end(); } catch { /* ignore */ }
+  },
+  getRelatedIds: (chatId) => {
+    const safe = String(chatId).replace(/[^0-9]/g, '');
+    const botPN = (sock?.user?.id || '').replace(/[^0-9]/g, '');
+    const botLID = (sock?.user?.lid || '').replace(/[^0-9]/g, '');
+    const envOwners = (process.env.OWNER_NUMBER || '').split(',').map(n => n.replace(/[^0-9]/g, '')).filter(Boolean);
+    const selfIds = new Set([botPN, botLID, ...envOwners].filter(Boolean));
+    if (selfIds.has(safe)) {
+      return [...selfIds];
+    }
+    return [safe];
+  }
 });
 
 let saveBufferTimer = null;
@@ -390,17 +405,38 @@ function snapshotAuthSession() {
   }
 }
 
+// In-memory cache for recent raw messages to support WhatsApp's retry protocol (getMessage)
+const recentRawMessages = new Map();
+
 export async function initWhatsAppBot() {
   const authDir = path.resolve('auth_info_baileys');
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
+
+  const msgRetryCounterCache = new Map();
+  const retryCacheStore = {
+    get: (key) => msgRetryCounterCache.get(key),
+    set: (key, val) => {
+      msgRetryCounterCache.set(key, val);
+      if (msgRetryCounterCache.size > 2000) {
+        const first = msgRetryCounterCache.keys().next().value;
+        msgRetryCounterCache.delete(first);
+      }
+    },
+    del: (key) => msgRetryCounterCache.delete(key),
+    flushAll: () => msgRetryCounterCache.clear()
+  };
 
   sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }), // Set to 'info' for debugging
     printQRInTerminal: false,
-    generateHighQualityLinkPreview: true
+    generateHighQualityLinkPreview: true,
+    msgRetryCounterCache: retryCacheStore,
+    getMessage: async (key) => {
+      return (key?.id && recentRawMessages.get(key.id)) || undefined;
+    }
   });
 
   // Handle credentials updates
@@ -531,6 +567,14 @@ export async function initWhatsAppBot() {
     if (!messages || messages.length === 0) return;
 
     for (const msg of messages) {
+      if (msg.key?.id && msg.message) {
+        recentRawMessages.set(msg.key.id, msg.message);
+        if (recentRawMessages.size > 2000) {
+          const firstKey = recentRawMessages.keys().next().value;
+          recentRawMessages.delete(firstKey);
+        }
+      }
+
       if (!msg.message) continue;
 
       // Unwrap ephemeral or view-once messages

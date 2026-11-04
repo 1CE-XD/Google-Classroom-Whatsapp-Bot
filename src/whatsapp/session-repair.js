@@ -51,16 +51,14 @@ import path from 'path';
 
 // ---- Tuning constants (REPAIR_* env vars exist only for the offline drill) --
 const WINDOW_MS = 10 * 60 * 1000;              // rolling failure window
-const STORM_THRESHOLD = 12;                    // failures in window = storm
+const STORM_THRESHOLD = 3;                    // 3 failures in window = auto-repair (Bad MAC never self-heals)
 const THROTTLE_MS = 90 * 1000;                 // one summary per chat per this
 const ARM_DELAY_MS =
-  Number(process.env.REPAIR_ARM_DELAY_MS) || 45 * 1000; // double-confirm beat
-const PER_CHAT_COOLDOWN_MS = 8 * 60 * 1000;    // min spacing per chat; each
-                                               // repair needs a FRESH storm so
-                                               // this cannot loop
-const PER_DAY_CAP = 3;                         // repairs per day (all chats)
+  Number(process.env.REPAIR_ARM_DELAY_MS) || 2500; // fast 2.5s confirm beat
+const PER_CHAT_COOLDOWN_MS = 60 * 1000;        // 1 min spacing per chat
+const PER_DAY_CAP = 50;                        // generous repair cap per day
 const BOOT_GRACE_MS =
-  Number(process.env.REPAIR_BOOT_GRACE_MS) || 2 * 60 * 1000; // uptime gate
+  Number(process.env.REPAIR_BOOT_GRACE_MS) || 15 * 1000; // 15s startup settling gate
 const PROCESS_BOOT_MS = Date.now();
 let bootAnchor = PROCESS_BOOT_MS;              // drill can shift this
 
@@ -75,7 +73,9 @@ const BACKUP_DIRNAME = path.join('data', 'auth_repair_backups');
 // runtime hooks, bound by bot.js (getters so reconnects are always current)
 const runtime = {
   isConnected: () => false,
-  sendOwnerBeacon: null
+  sendOwnerBeacon: null,
+  closeSocket: null,
+  getRelatedIds: null
 };
 
 // module-level capture of the ORIGINAL console.error for our own summaries
@@ -118,6 +118,8 @@ export function bindSessionRepair(binding) {
   if (!binding) return;
   if (typeof binding.isConnected === 'function') runtime.isConnected = binding.isConnected;
   if (typeof binding.sendOwnerBeacon === 'function') runtime.sendOwnerBeacon = binding.sendOwnerBeacon;
+  if (typeof binding.closeSocket === 'function') runtime.closeSocket = binding.closeSocket;
+  if (typeof binding.getRelatedIds === 'function') runtime.getRelatedIds = binding.getRelatedIds;
 }
 
 // ---- per-chat failure window ------------------------------------------------
@@ -253,9 +255,32 @@ export function selectRepairTargets(dir, chat) {
   if (!safe || safe.length < 6) return [];
   let names;
   try { names = fs.readdirSync(dir); } catch { return []; }
-  const reSession = new RegExp(`^session-${safe}(?:\\.\\d+)?\\.json$`);
-  const reSenderKey = new RegExp(`^sender-key-.+--${safe}--\\d+\\.json$`);
-  return names.filter(n => reSession.test(n) || reSenderKey.test(n)).sort();
+
+  // Check safe ID and any related IDs (e.g. LID <-> PN pair)
+  const allIds = new Set([safe]);
+  if (typeof runtime.getRelatedIds === 'function') {
+    try {
+      const related = runtime.getRelatedIds(safe);
+      if (Array.isArray(related)) {
+        for (const r of related) {
+          const rSafe = String(r).replace(/[^0-9]/g, '');
+          if (rSafe && rSafe.length >= 6) allIds.add(rSafe);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  const matched = new Set();
+  for (const id of allIds) {
+    const reSession = new RegExp(`^session-${id}(?:\\.\\d+)?\\.json$`);
+    const reSenderKey = new RegExp(`^sender-key-.+--${id}--\\d+\\.json$`);
+    for (const n of names) {
+      if (reSession.test(n) || reSenderKey.test(n)) {
+        matched.add(n);
+      }
+    }
+  }
+  return [...matched].sort();
 }
 
 function resolveAuthDir() {
@@ -309,9 +334,13 @@ async function performRepair(chat) {
 
     // ---- order matters: DM FIRST, then move the keys.
     // A WhatsApp send/rotate activity can flush the socket's in-memory key map
-    // back to disk; if we moved the files first, the dying process could
-    // re-save some of them (it really did). Hence: notify -> move -> settle.
+    // back to disk; hence: notify -> close socket -> move -> exit.
     const dmOk = await notifyOwner(chat, targets.length, kindForTargets());
+
+    // Explicitly disconnect/close socket to stop any further disk writes
+    if (typeof runtime.closeSocket === 'function') {
+      try { runtime.closeSocket(); } catch { /* ignore */ }
+    }
 
     // ---- real repair: move (never delete) -> backup dir --------------------
     const stamp = new Date(now).toISOString().replace(/[:T]/g, '-').slice(0, 19);
@@ -421,12 +450,27 @@ export function installDecryptObserver() {
   if (DRY_RUN) {
     report('[SESSION-REPAIR] module active (DRY-RUN drill: simulations only, nothing moves).');
   } else {
-    report(`[SESSION-REPAIR] decrypt-failure watch active - boot grace ${Math.round(BOOT_GRACE_MS / 60000)} min; storms repair themselves automatically.`);
-    // one-time gate close: drop any pre-grace backlog echoes so a stale
-    // window can never arm on its own after the grace
+    const graceSec = Math.round(BOOT_GRACE_MS / 1000);
+    report(`[SESSION-REPAIR] decrypt-failure watch active - boot grace ${graceSec}s; desynced sessions repair themselves automatically.`);
+    // Startup settling gate: inspect backlog failures and auto-heal dead sessions
     setTimeout(() => {
       if (bootBacklog.total > 0) {
         report(backlogSummary('boot recap'));
+        // If any chat failed repeatedly during startup backlog, its session is desynced on disk
+        const deadChats = [...bootBacklog.chats.entries()]
+          .filter(([, count]) => count >= 3)
+          .sort((a, b) => b[1] - a[1]);
+
+        if (deadChats.length > 0) {
+          const [brokenChat, count] = deadChats[0];
+          report(`[SESSION-REPAIR] Startup check: chat ${brokenChat} had ${count} decrypt failure(s) during boot backlog - session is desynced. Auto-repairing now...`);
+          bootBacklog.total = 0;
+          bootBacklog.lastSummaryAt = 0;
+          bootBacklog.chats.clear();
+          failures.clear();
+          performRepair(brokenChat).catch(err => report('[SESSION-REPAIR] startup repair error:', err?.message || err));
+          return;
+        }
       } else {
         report('[SESSION-REPAIR] boot backlog was clean - no stale replays inside the grace window.');
       }
