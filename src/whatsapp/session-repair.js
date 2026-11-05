@@ -51,14 +51,17 @@ import path from 'path';
 
 // ---- Tuning constants (REPAIR_* env vars exist only for the offline drill) --
 const WINDOW_MS = 10 * 60 * 1000;              // rolling failure window
-const STORM_THRESHOLD = 3;                    // 3 failures in window = auto-repair (Bad MAC never self-heals)
+const STORM_THRESHOLD = 12;                    // 12 failures in window = storm;
+                                               // transient ratchet churn NEVER
+                                               // reaches this (it self-heals via
+                                               // WhatsApp's own retry protocol)
 const THROTTLE_MS = 90 * 1000;                 // one summary per chat per this
 const ARM_DELAY_MS =
-  Number(process.env.REPAIR_ARM_DELAY_MS) || 2500; // fast 2.5s confirm beat
-const PER_CHAT_COOLDOWN_MS = 60 * 1000;        // 1 min spacing per chat
-const PER_DAY_CAP = 50;                        // generous repair cap per day
+  Number(process.env.REPAIR_ARM_DELAY_MS) || 45 * 1000; // double-confirm beat
+const PER_CHAT_COOLDOWN_MS = 8 * 60 * 1000;    // min spacing per chat
+const PER_DAY_CAP = 3;                         // repairs per day (all chats)
 const BOOT_GRACE_MS =
-  Number(process.env.REPAIR_BOOT_GRACE_MS) || 15 * 1000; // 15s startup settling gate
+  Number(process.env.REPAIR_BOOT_GRACE_MS) || 2 * 60 * 1000; // uptime gate
 const PROCESS_BOOT_MS = Date.now();
 let bootAnchor = PROCESS_BOOT_MS;              // drill can shift this
 
